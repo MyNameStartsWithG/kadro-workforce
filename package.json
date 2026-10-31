@@ -1,12 +1,13 @@
 {
-  "name": "kadro-dms",
+  "name": "kadro-workforce",
   "version": "2.5.2",
-  "description": "ACME Mühendislik - Kurumsal Belge Yonetim Sistemi",
+  "description": "Kadro — workforce management for field crews: timesheets, payroll, cash, documents and voice commands",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "paketle": "node paketle.mjs"
+    "build": "node build.mjs",
+    "test": "bash test/run.sh"
   },
   "license": "UNLICENSED",
   "private": true,

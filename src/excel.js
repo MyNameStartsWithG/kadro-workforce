@@ -1,29 +1,30 @@
 /**
- * Tabloları .xlsx olarak dışa aktarır ve geri okur.
- * Dışa aktarılan dosya Excel'de doğrudan düzenlenip tekrar içe aktarılabilir:
- * başlık satırı sütun anahtarını taşır, seçim sütunlarında açılır liste vardır.
+ * Exports tables to .xlsx and reads them back.
+ * An exported file can be edited in Excel and imported again:
+ * the header row carries the column labels, select columns have a drop-down list.
  */
 import ExcelJS from "exceljs";
-import { TABLOLAR } from "./tablolar.js";
+import { TABLES } from "./tables.js";
 
-const TURUNCU = "FFE85D04";
-const SIYAH = "FF141210";
-const ACIK = "FFF6F3F0";
+const ORANGE = "FFE85D04";
+const BLACK = "FF141210";
+const LIGHT = "FFF6F3F0";
+const COMPANY = "ACME ENGINEERING";
 
-function bicimlendir(deger, tur) {
-  if (deger === undefined || deger === null || deger === "") return null;
-  if (tur === "sayi" || tur === "para") {
-    const n = Number(String(deger).replace(/[^\d.,-]/g, "").replace(",", "."));
+function cellValue(value, type) {
+  if (value === undefined || value === null || value === "") return null;
+  if (type === "number" || type === "money") {
+    const n = Number(String(value).replace(/[^\d.,-]/g, "").replace(",", "."));
     return Number.isFinite(n) ? n : null;
   }
-  if (tur === "tarih") {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(deger).trim());
-    return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : String(deger);
+  if (type === "date") {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value).trim());
+    return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : String(value);
   }
-  return String(deger);
+  return String(value);
 }
 
-function tarihMetnine(v) {
+function toDateText(v) {
   if (!v) return "";
   if (v instanceof Date) {
     const p = (n) => String(n).padStart(2, "0");
@@ -37,503 +38,503 @@ function tarihMetnine(v) {
   return s;
 }
 
-export async function tabloyuYaz(tabloAdi, satirlar) {
-  const tanim = TABLOLAR[tabloAdi];
-  if (!tanim) throw new Error(`Bilinmeyen tablo: ${tabloAdi}`);
+export async function writeTable(tableName, rows) {
+  const def = TABLES[tableName];
+  if (!def) throw new Error(`Unknown table: ${tableName}`);
 
-  const kitap = new ExcelJS.Workbook();
-  kitap.creator = "KADRO DMS";
-  kitap.created = new Date();
-  const sayfa = kitap.addWorksheet(tanim.ad, {
+  const book = new ExcelJS.Workbook();
+  book.creator = "Kadro";
+  book.created = new Date();
+  const sheet = book.addWorksheet(def.name, {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   });
 
-  // 1. satır: başlık bandı
-  sayfa.mergeCells(1, 1, 1, tanim.kolon.length);
-  const bant = sayfa.getCell(1, 1);
-  bant.value = `ACME MÜHENDİSLİK — ${tanim.ad}   ·   ${new Date().toLocaleDateString("tr-TR")}   ·   ${satirlar.length} kayıt`;
-  bant.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
-  bant.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SIYAH } };
-  bant.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
-  sayfa.getRow(1).height = 26;
+  // Row 1: title band
+  sheet.mergeCells(1, 1, 1, def.columns.length);
+  const band = sheet.getCell(1, 1);
+  band.value = `${COMPANY} — ${def.name}   ·   ${new Date().toLocaleDateString("en-GB")}   ·   ${rows.length} records`;
+  band.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
+  band.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLACK } };
+  band.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+  sheet.getRow(1).height = 26;
 
-  // 2. satır: sütun başlıkları
-  const basliklar = sayfa.getRow(2);
-  tanim.kolon.forEach((k, i) => {
-    const h = basliklar.getCell(i + 1);
-    h.value = k.b;
+  // Row 2: column headers
+  const headers = sheet.getRow(2);
+  def.columns.forEach((c, i) => {
+    const h = headers.getCell(i + 1);
+    h.value = c.label;
     h.font = { name: "Calibri", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
-    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TURUNCU } };
+    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ORANGE } };
     h.alignment = { vertical: "middle", horizontal: "left", indent: 1, wrapText: true };
-    h.border = { bottom: { style: "thin", color: { argb: SIYAH } } };
-    sayfa.getColumn(i + 1).width = Math.max(10, Math.round((k.gen || 120) / 8));
+    h.border = { bottom: { style: "thin", color: { argb: BLACK } } };
+    sheet.getColumn(i + 1).width = Math.max(10, Math.round((c.width || 120) / 8));
   });
-  basliklar.height = 22;
+  headers.height = 22;
 
-  // Veri satırları
-  satirlar.forEach((satir, ri) => {
-    const r = sayfa.getRow(ri + 3);
-    tanim.kolon.forEach((k, ci) => {
+  // Data rows
+  rows.forEach((row, ri) => {
+    const r = sheet.getRow(ri + 3);
+    def.columns.forEach((c, ci) => {
       const h = r.getCell(ci + 1);
-      h.value = bicimlendir(satir[k.k], k.tur);
+      h.value = cellValue(row[c.key], c.type);
       h.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
-      if (k.tur === "tarih") h.numFmt = "yyyy-mm-dd";
-      if (k.tur === "para") h.numFmt = "#,##0.00";
-      if (ri % 2 === 1) h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACIK } };
-      if (k.tur === "salt") h.font = { color: { argb: "FF8A8078" } };
+      if (c.type === "date") h.numFmt = "yyyy-mm-dd";
+      if (c.type === "money") h.numFmt = "#,##0.00";
+      if (ri % 2 === 1) h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: LIGHT } };
+      if (c.type === "readonly") h.font = { color: { argb: "FF8A8078" } };
     });
     r.height = 18;
   });
 
-  // Seçim sütunlarına açılır liste
-  tanim.kolon.forEach((k, ci) => {
-    if (k.tur !== "secim" || !k.secenek?.length) return;
-    for (let r = 3; r <= Math.max(satirlar.length + 2, 500); r += 1) {
-      sayfa.getCell(r, ci + 1).dataValidation = {
+  // Drop-down lists on select columns
+  def.columns.forEach((c, ci) => {
+    if (c.type !== "select" || !c.options?.length) return;
+    for (let r = 3; r <= Math.max(rows.length + 2, 500); r += 1) {
+      sheet.getCell(r, ci + 1).dataValidation = {
         type: "list", allowBlank: true,
-        formulae: [`"${k.secenek.join(",")}"`],
+        formulae: [`"${c.options.join(",")}"`],
       };
     }
   });
 
-  sayfa.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: tanim.kolon.length } };
-  return kitap.xlsx.writeBuffer();
+  sheet.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: def.columns.length } };
+  return book.xlsx.writeBuffer();
 }
 
-/** Yüklenen .xlsx dosyasını okuyup satır nesnelerine çevirir. */
-export async function tabloyuOku(tabloAdi, tampon) {
-  const tanim = TABLOLAR[tabloAdi];
-  if (!tanim) throw new Error(`Bilinmeyen tablo: ${tabloAdi}`);
+/** Reads an uploaded .xlsx file into row objects. */
+export async function readTable(tableName, buffer) {
+  const def = TABLES[tableName];
+  if (!def) throw new Error(`Unknown table: ${tableName}`);
 
-  const kitap = new ExcelJS.Workbook();
-  await kitap.xlsx.load(tampon);
-  const sayfa = kitap.worksheets[0];
-  if (!sayfa) throw new Error("Dosyada okunabilir bir sayfa yok.");
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.load(buffer);
+  const sheet = book.worksheets[0];
+  if (!sheet) throw new Error("The file has no readable sheet.");
 
-  // Başlık satırını bul: sütun adlarının en çok eşleştiği ilk 5 satır içinde.
-  const etiketler = new Map(tanim.kolon.map((k) => [k.b.toLocaleLowerCase("tr"), k]));
-  let baslikSatiri = 0, esleme = null, enIyi = 0;
+  // Find the header row: the row among the first 6 that matches the most column labels.
+  const labels = new Map(def.columns.map((c) => [c.label.toLowerCase(), c]));
+  let headerRow = 0, mapping = null, best = 0;
 
-  for (let r = 1; r <= Math.min(6, sayfa.rowCount); r += 1) {
-    const harita = new Map();
-    let sayac = 0;
-    sayfa.getRow(r).eachCell({ includeEmpty: false }, (hucre, ci) => {
-      const metin = String(hucre.text || "").trim().toLocaleLowerCase("tr");
-      const k = etiketler.get(metin);
-      if (k) { harita.set(ci, k); sayac += 1; }
+  for (let r = 1; r <= Math.min(6, sheet.rowCount); r += 1) {
+    const map = new Map();
+    let hits = 0;
+    sheet.getRow(r).eachCell({ includeEmpty: false }, (cell, ci) => {
+      const text = String(cell.text || "").trim().toLowerCase();
+      const c = labels.get(text);
+      if (c) { map.set(ci, c); hits += 1; }
     });
-    if (sayac > enIyi) { enIyi = sayac; baslikSatiri = r; esleme = harita; }
+    if (hits > best) { best = hits; headerRow = r; mapping = map; }
   }
-  if (!esleme || enIyi === 0) {
-    throw new Error("Başlık satırı bulunamadı. Lütfen sistemden indirdiğiniz şablonu kullanın.");
+  if (!mapping || best === 0) {
+    throw new Error("Header row not found. Please use the template downloaded from the system.");
   }
 
-  const satirlar = [];
-  for (let r = baslikSatiri + 1; r <= sayfa.rowCount; r += 1) {
-    const kaynak = sayfa.getRow(r);
-    const nesne = {};
-    let doluMu = false;
-    for (const [ci, k] of esleme) {
-      const hucre = kaynak.getCell(ci);
-      let v = hucre.value;
+  const rows = [];
+  for (let r = headerRow + 1; r <= sheet.rowCount; r += 1) {
+    const src = sheet.getRow(r);
+    const obj = {};
+    let filled = false;
+    for (const [ci, c] of mapping) {
+      const cell = src.getCell(ci);
+      let v = cell.value;
       if (v && typeof v === "object" && "result" in v) v = v.result;
       if (v && typeof v === "object" && "text" in v) v = v.text;
-      if (v === null || v === undefined || v === "") { nesne[k.k] = ""; continue; }
-      nesne[k.k] = k.tur === "tarih" ? tarihMetnine(v) : String(v).trim();
-      if (nesne[k.k]) doluMu = true;
+      if (v === null || v === undefined || v === "") { obj[c.key] = ""; continue; }
+      obj[c.key] = c.type === "date" ? toDateText(v) : String(v).trim();
+      if (obj[c.key]) filled = true;
     }
-    if (doluMu) satirlar.push(nesne);
+    if (filled) rows.push(obj);
   }
-  return { satirlar, baslikSatiri, taninanSutun: enIyi };
+  return { rows, headerRow, recognisedColumns: best };
 }
 
 /* ------------------------------------------------------------------ */
-/* Puantaj                                                             */
+/* Timesheet                                                           */
 /* ------------------------------------------------------------------ */
 
-const TIP_RENK = { mesai: "FFFCEADD", tatil: "FFE7E0D9" };
-const PB_SIRA = ["EUR", "TRY", "RSD"];
-const pbMetni = (t) => PB_SIRA.concat(Object.keys(t || {}).filter((k) => !PB_SIRA.includes(k)))
-  .filter((k) => t?.[k]).map((k) => `${t[k].toLocaleString("tr-TR")} ${k}`).join("  ·  ") || "—";
+const TYPE_COLOR = { overtime: "FFFCEADD", holiday: "FFE7E0D9" };
+const CURRENCY_ORDER = ["EUR", "TRY", "RSD"];
+const currencyText = (t) => CURRENCY_ORDER.concat(Object.keys(t || {}).filter((k) => !CURRENCY_ORDER.includes(k)))
+  .filter((k) => t?.[k]).map((k) => `${t[k].toLocaleString("en-GB")} ${k}`).join("  ·  ") || "—";
 
 /**
- * Dönemi .xlsx olarak yazar. Saat hücreleri sayıdır, toplamlar Excel formülüdür.
- * Dosya Excel'de düzenlenip "Excel'den yükle" ile geri okunabilir (sadece gün hücreleri okunur).
+ * Writes a period as .xlsx. Hour cells are numbers, totals are Excel formulas.
+ * The file can be edited in Excel and read back with "Import from Excel" (only the day cells are read).
  */
-export async function puantajYaz(p, hesap, gunler, baslik) {
-  const kitap = new ExcelJS.Workbook();
-  kitap.creator = "KADRO DMS";
-  kitap.created = new Date();
-  const sayfa = kitap.addWorksheet("Puantaj", {
+export async function writeTimesheet(t, calc, days, title) {
+  const book = new ExcelJS.Workbook();
+  book.creator = "Kadro";
+  book.created = new Date();
+  const sheet = book.addWorksheet("Timesheet", {
     views: [{ state: "frozen", xSplit: 3, ySplit: 3 }],
     pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   });
 
-  const sabit = ["Personel Kodu", "Ad Soyad", "Ekip"];
-  const sag = ["Toplam", "Normal", "Mesai", "Eksik", "Ödeme", "Ücret", "Hakediş", "Kesinti", "Avans", "Net", "Para Birimi"];
-  const ilkGun = sabit.length + 1;
-  const sonGun = sabit.length + gunler.length;
-  const sutunSayisi = sonGun + sag.length;
+  const fixed = ["Employee Code", "Full Name", "Crew"];
+  const right = ["Total", "Normal", "Overtime", "Short", "Pay Type", "Pay", "Earnings", "Deduction", "Advance", "Net", "Currency"];
+  const firstDay = fixed.length + 1;
+  const lastDay = fixed.length + days.length;
+  const columnCount = lastDay + right.length;
 
-  sayfa.mergeCells(1, 1, 1, sutunSayisi);
-  const bant = sayfa.getCell(1, 1);
-  bant.value = `ACME MÜHENDİSLİK — Puantaj · ${baslik}   ·   çarpan ${p.ayar.mesaiCarpani}   ·   normal gün ${p.ayar.normalSaat} saat` +
-    (p.durum === "kapali" ? "   ·   KAPALI" : "");
-  bant.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
-  bant.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SIYAH } };
-  bant.alignment = { vertical: "middle", indent: 1 };
-  sayfa.getRow(1).height = 26;
+  sheet.mergeCells(1, 1, 1, columnCount);
+  const band = sheet.getCell(1, 1);
+  band.value = `${COMPANY} — Timesheet · ${title}   ·   multiplier ${t.settings.overtimeMultiplier}   ·   normal day ${t.settings.normalHours} h` +
+    (t.status === "closed" ? "   ·   CLOSED" : "");
+  band.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
+  band.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLACK } };
+  band.alignment = { vertical: "middle", indent: 1 };
+  sheet.getRow(1).height = 26;
 
-  // 2. satır gün adı, 3. satır gün numarası (geri okumada sütun anahtarı budur).
-  const basBicim = (h, renk = TURUNCU) => {
-    h.font = { name: "Calibri", size: 10, bold: true, color: { argb: renk === TURUNCU ? "FFFFFFFF" : SIYAH } };
-    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: renk } };
+  // Row 2: day name, row 3: day number (the column key when reading back).
+  const headStyle = (h, color = ORANGE) => {
+    h.font = { name: "Calibri", size: 10, bold: true, color: { argb: color === ORANGE ? "FFFFFFFF" : BLACK } };
+    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color } };
     h.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
   };
-  sabit.forEach((b, i) => { sayfa.mergeCells(2, i + 1, 3, i + 1); const h = sayfa.getCell(2, i + 1); h.value = b; basBicim(h); });
-  gunler.forEach((g, i) => {
-    const renk = TIP_RENK[p.gunler[g.gun]] || TURUNCU;
-    const h1 = sayfa.getCell(2, ilkGun + i), h2 = sayfa.getCell(3, ilkGun + i);
-    h1.value = g.kisa; h2.value = g.no;
-    basBicim(h1, renk); basBicim(h2, renk);
-    sayfa.getColumn(ilkGun + i).width = 5.2;
+  fixed.forEach((b, i) => { sheet.mergeCells(2, i + 1, 3, i + 1); const h = sheet.getCell(2, i + 1); h.value = b; headStyle(h); });
+  days.forEach((d, i) => {
+    const color = TYPE_COLOR[t.days[d.day]] || ORANGE;
+    const h1 = sheet.getCell(2, firstDay + i), h2 = sheet.getCell(3, firstDay + i);
+    h1.value = d.short; h2.value = d.no;
+    headStyle(h1, color); headStyle(h2, color);
+    sheet.getColumn(firstDay + i).width = 5.2;
   });
-  sag.forEach((b, i) => { const c = sonGun + 1 + i; sayfa.mergeCells(2, c, 3, c); const h = sayfa.getCell(2, c); h.value = b; basBicim(h); });
-  sayfa.getColumn(1).width = 16; sayfa.getColumn(2).width = 24; sayfa.getColumn(3).width = 10;
-  sag.forEach((_, i) => { sayfa.getColumn(sonGun + 1 + i).width = 11; });
+  right.forEach((b, i) => { const c = lastDay + 1 + i; sheet.mergeCells(2, c, 3, c); const h = sheet.getCell(2, c); h.value = b; headStyle(h); });
+  sheet.getColumn(1).width = 16; sheet.getColumn(2).width = 24; sheet.getColumn(3).width = 10;
+  right.forEach((_, i) => { sheet.getColumn(lastDay + 1 + i).width = 11; });
 
-  const harf = (c) => sayfa.getColumn(c).letter;
-  const ilkVeri = 4;
-  p.satirlar.forEach((s, ri) => {
-    const h = hesap.satirlar[ri];
-    const r = sayfa.getRow(ilkVeri + ri);
-    r.getCell(1).value = s.personelKod;
-    r.getCell(2).value = s.ad;
-    r.getCell(3).value = s.ekip || "—";
-    gunler.forEach((g, i) => {
-      const hucre = r.getCell(ilkGun + i);
-      const v = s.hucre[g.gun] || "";
-      hucre.value = /^\d/.test(v) ? Number(v) : (v || null);
-      hucre.alignment = { horizontal: "center" };
-      const renk = TIP_RENK[p.gunler[g.gun]];
-      if (renk) hucre.fill = { type: "pattern", pattern: "solid", fgColor: { argb: renk } };
-      if (s.ekipGun[g.gun]) hucre.note = `Bu gün ekibi: ${s.ekipGun[g.gun]}`;
+  const letter = (c) => sheet.getColumn(c).letter;
+  const firstData = 4;
+  t.rows.forEach((r, ri) => {
+    const h = calc.rows[ri];
+    const row = sheet.getRow(firstData + ri);
+    row.getCell(1).value = r.employeeCode;
+    row.getCell(2).value = r.name;
+    row.getCell(3).value = r.crew || "—";
+    days.forEach((d, i) => {
+      const cell = row.getCell(firstDay + i);
+      const v = r.cells[d.day] || "";
+      cell.value = /^\d/.test(v) ? Number(v) : (v || null);
+      cell.alignment = { horizontal: "center" };
+      const color = TYPE_COLOR[t.days[d.day]];
+      if (color) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: color } };
+      if (r.crewDays[d.day]) cell.note = `Crew on this day: ${r.crewDays[d.day]}`;
     });
-    const n = ilkVeri + ri;
-    const c0 = sonGun + 1;
-    r.getCell(c0).value = { formula: `SUM(${harf(ilkGun)}${n}:${harf(sonGun)}${n})`, result: h.toplam };
-    r.getCell(c0 + 1).value = h.normal;
-    r.getCell(c0 + 2).value = h.mesai;
-    r.getCell(c0 + 3).value = h.eksik;
-    r.getCell(c0 + 4).value = s.odemeTuru || "—";
-    r.getCell(c0 + 5).value = Number(s.ucret) || null;
-    r.getCell(c0 + 6).value = h.hakedis;
-    r.getCell(c0 + 7).value = h.kesinti || null;
-    if (h.kesintiKalem?.length) r.getCell(c0 + 7).note = h.kesintiKalem.map((k) => `${k.ad}: ${k.formul} = ${k.tutar} ${k.pb}${k.dusulmedi ? " (düşülmedi)" : ""}`).join("\n");
-    r.getCell(c0 + 8).value = (h.avansDusulen ?? h.avans[h.paraBirimi]) || null;
-    r.getCell(c0 + 9).value = h.net[h.paraBirimi];
-    r.getCell(c0 + 10).value = h.paraBirimi;
-    for (let c = c0 + 5; c <= c0 + 9; c += 1) r.getCell(c).numFmt = "#,##0.00";
-    if (ri % 2 === 1) [1, 2, 3].forEach((c) => { r.getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACIK } }; });
+    const n = firstData + ri;
+    const c0 = lastDay + 1;
+    row.getCell(c0).value = { formula: `SUM(${letter(firstDay)}${n}:${letter(lastDay)}${n})`, result: h.total };
+    row.getCell(c0 + 1).value = h.normal;
+    row.getCell(c0 + 2).value = h.overtime;
+    row.getCell(c0 + 3).value = h.short;
+    row.getCell(c0 + 4).value = r.payType || "—";
+    row.getCell(c0 + 5).value = Number(r.pay) || null;
+    row.getCell(c0 + 6).value = h.earnings;
+    row.getCell(c0 + 7).value = h.deduction || null;
+    if (h.deductionItems?.length) row.getCell(c0 + 7).note = h.deductionItems.map((k) => `${k.name}: ${k.formula} = ${k.amount} ${k.currency}${k.notDeducted ? " (not deducted)" : ""}`).join("\n");
+    row.getCell(c0 + 8).value = (h.advanceDeducted ?? h.advance[h.currency]) || null;
+    row.getCell(c0 + 9).value = h.net[h.currency];
+    row.getCell(c0 + 10).value = h.currency;
+    for (let c = c0 + 5; c <= c0 + 9; c += 1) row.getCell(c).numFmt = "#,##0.00";
+    if (ri % 2 === 1) [1, 2, 3].forEach((c) => { row.getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: LIGHT } }; });
   });
 
-  // Toplam satırı: saat sütunlarında formül.
-  if (p.satirlar.length) {
-    const son = ilkVeri + p.satirlar.length - 1;
-    const t = sayfa.getRow(son + 2);
-    t.getCell(2).value = "TOPLAM";
-    t.font = { bold: true };
-    for (let c = ilkGun; c <= sonGun + 4; c += 1) {
-      t.getCell(c).value = { formula: `SUM(${harf(c)}${ilkVeri}:${harf(c)}${son})` };
-      t.getCell(c).alignment = { horizontal: "center" };
+  // Total row: formulas in the hour columns.
+  if (t.rows.length) {
+    const last = firstData + t.rows.length - 1;
+    const tr = sheet.getRow(last + 2);
+    tr.getCell(2).value = "TOTAL";
+    tr.font = { bold: true };
+    for (let c = firstDay; c <= lastDay + 4; c += 1) {
+      tr.getCell(c).value = { formula: `SUM(${letter(c)}${firstData}:${letter(c)}${last})` };
+      tr.getCell(c).alignment = { horizontal: "center" };
     }
   }
 
-  const o = kitap.addWorksheet("Özet");
+  const o = book.addWorksheet("Summary");
   o.getColumn(1).width = 30; o.getColumn(2).width = 48;
-  const z = hesap.ozet;
+  const z = calc.summary;
   [
-    ["Dönem", baslik],
-    ["Durum", p.durum === "kapali" ? "Kapalı" : "Açık"],
-    ["Kişi sayısı", z.kisi],
-    ["Ekip sayısı", z.ekip],
-    ["Toplam çalışma saati", z.toplamSaat],
-    ["Normal saat", z.normal],
-    ["Mesai saati", z.mesai],
-    ["Eksik iş saati", z.eksik],
-    ["İzin / rapor / gelmedi (gün)", `${z.izin} / ${z.rapor} / ${z.gelmedi}`],
-    ["Hakediş", pbMetni(z.hakedis)],
-    ["Kesinti", pbMetni(z.kesinti)],
-    ["Avans", pbMetni(z.avans)],
-    ["Net", pbMetni(z.net)],
-    ...(Object.keys(z.aySonu).length ? [["Ay sonu ödenecek (iki yarı)", pbMetni(z.aySonu)]] : []),
-    ["Yemek", pbMetni(z.yemek)],
-    ["Kira payı", pbMetni(z.kira)],
-    ["Mesai çarpanı", p.ayar.mesaiCarpani],
-    ["Normal gün saati", p.ayar.normalSaat],
-    ["Hafta içi aşım mesai mi", p.ayar.haftaIciAsim ? "Evet" : "Hayır"],
-    ["Tatilde çalışma mesai mi", p.ayar.tatilMesai ? "Evet" : "Hayır"],
-    ...(p.ayar.kur && (p.kural || 1) >= 3
-      ? [["Kur", Object.entries(p.ayar.kur.oran || {}).map(([pb, v]) => `1 ${p.ayar.kur.ana} = ${v} ${pb}`).join(" · ") || "girilmedi"]] : []),
+    ["Period", title],
+    ["Status", t.status === "closed" ? "Closed" : "Open"],
+    ["People", z.people],
+    ["Crews", z.crews],
+    ["Total hours worked", z.totalHours],
+    ["Normal hours", z.normal],
+    ["Overtime hours", z.overtime],
+    ["Short hours", z.short],
+    ["Leave / sick / absent (days)", `${z.leave} / ${z.sick} / ${z.absent}`],
+    ["Earnings", currencyText(z.earnings)],
+    ["Deductions", currencyText(z.deduction)],
+    ["Advances", currencyText(z.advance)],
+    ["Net", currencyText(z.net)],
+    ...(Object.keys(z.monthEnd).length ? [["Month-end pay (both halves)", currencyText(z.monthEnd)]] : []),
+    ["Meals", currencyText(z.meals)],
+    ["Rent share", currencyText(z.rent)],
+    ["Overtime multiplier", t.settings.overtimeMultiplier],
+    ["Normal day hours", t.settings.normalHours],
+    ["Weekday excess counts as overtime", t.settings.weekdayExcess ? "Yes" : "No"],
+    ["Work on holidays counts as overtime", t.settings.holidayAsOvertime ? "Yes" : "No"],
+    ...(t.settings.rates && (t.rule || 1) >= 3
+      ? [["Rates", Object.entries(t.settings.rates.rate || {}).map(([c, v]) => `1 ${t.settings.rates.base} = ${v} ${c}`).join(" · ") || "not entered"]] : []),
   ].forEach(([a, b], i) => {
     const r = o.getRow(i + 1);
     r.getCell(1).value = a; r.getCell(2).value = b;
     r.getCell(1).font = { bold: true };
   });
 
-  return kitap.xlsx.writeBuffer();
+  return book.xlsx.writeBuffer();
 }
 
-/** Excel'den gün hücrelerini okur. Döner: { degisiklikler: [{ personelKod, gun, deger }], bilinmeyen } */
-export async function puantajOku(tampon, p, gunler) {
-  const kitap = new ExcelJS.Workbook();
-  await kitap.xlsx.load(tampon);
-  const sayfa = kitap.getWorksheet("Puantaj") || kitap.worksheets[0];
-  if (!sayfa) throw new Error("Dosyada okunabilir bir sayfa yok.");
+/** Reads the day cells from Excel. Returns: { changes: [{ employeeCode, day, value }], unknown } */
+export async function readTimesheet(buffer, t, days) {
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.load(buffer);
+  const sheet = book.getWorksheet("Timesheet") || book.worksheets[0];
+  if (!sheet) throw new Error("The file has no readable sheet.");
 
-  let basSatiri = 0, kodSutunu = 0;
-  for (let r = 1; r <= Math.min(8, sayfa.rowCount) && !kodSutunu; r += 1) {
-    sayfa.getRow(r).eachCell({ includeEmpty: false }, (h, c) => {
-      if (String(h.text).trim().toLocaleLowerCase("tr") === "personel kodu") { kodSutunu = c; basSatiri = r; }
+  let headerRow = 0, codeColumn = 0;
+  for (let r = 1; r <= Math.min(8, sheet.rowCount) && !codeColumn; r += 1) {
+    sheet.getRow(r).eachCell({ includeEmpty: false }, (h, c) => {
+      if (String(h.text).trim().toLowerCase() === "employee code") { codeColumn = c; headerRow = r; }
     });
   }
-  if (!kodSutunu) throw new Error("\"Personel Kodu\" sütunu bulunamadı. Sistemden indirdiğiniz puantaj dosyasını kullanın.");
+  if (!codeColumn) throw new Error("\"Employee Code\" column not found. Use the timesheet file downloaded from the system.");
 
-  // Gün numarası başlık satırında ya da hemen altında olabilir.
-  const numaradan = new Map(gunler.map((g) => [g.no, g.gun]));
-  const sutunGun = new Map();
-  let veriBasi = basSatiri + 1;
-  for (let r = basSatiri; r <= basSatiri + 1; r += 1) {
-    let bulundu = false;
-    sayfa.getRow(r).eachCell({ includeEmpty: false }, (h, c) => {
+  // The day number can be in the header row or right below it.
+  const byNumber = new Map(days.map((d) => [d.no, d.day]));
+  const columnDay = new Map();
+  let dataStart = headerRow + 1;
+  for (let r = headerRow; r <= headerRow + 1; r += 1) {
+    let found = false;
+    sheet.getRow(r).eachCell({ includeEmpty: false }, (h, c) => {
       const n = Number(h.value);
-      if (c > kodSutunu && Number.isInteger(n) && numaradan.has(n) && !sutunGun.has(c)) { sutunGun.set(c, numaradan.get(n)); bulundu = true; }
+      if (c > codeColumn && Number.isInteger(n) && byNumber.has(n) && !columnDay.has(c)) { columnDay.set(c, byNumber.get(n)); found = true; }
     });
-    if (bulundu) veriBasi = r + 1;
+    if (found) dataStart = r + 1;
   }
-  if (!sutunGun.size) throw new Error("Gün sütunları bulunamadı. Dosya bu döneme ait olmayabilir.");
+  if (!columnDay.size) throw new Error("Day columns not found. The file may belong to another period.");
 
-  const kodlar = new Set(p.satirlar.map((s) => s.personelKod));
-  const degisiklikler = [], bilinmeyen = [];
-  for (let r = veriBasi; r <= sayfa.rowCount; r += 1) {
-    const satir = sayfa.getRow(r);
-    const kod = String(satir.getCell(kodSutunu).text || "").trim();
-    if (!kod || kod === "TOPLAM") continue;
-    if (!kodlar.has(kod)) { if (/^[A-Z]{2,4}-/.test(kod)) bilinmeyen.push(kod); continue; }
-    for (const [c, gun] of sutunGun) {
-      let v = satir.getCell(c).value;
+  const codes = new Set(t.rows.map((r) => r.employeeCode));
+  const changes = [], unknown = [];
+  for (let r = dataStart; r <= sheet.rowCount; r += 1) {
+    const row = sheet.getRow(r);
+    const code = String(row.getCell(codeColumn).text || "").trim();
+    if (!code || code === "TOTAL") continue;
+    if (!codes.has(code)) { if (/^[A-Z]{2,4}-/.test(code)) unknown.push(code); continue; }
+    for (const [c, day] of columnDay) {
+      let v = row.getCell(c).value;
       if (v && typeof v === "object" && "result" in v) v = v.result;
-      degisiklikler.push({ personelKod: kod, gun, deger: v === null || v === undefined ? "" : String(v) });
+      changes.push({ employeeCode: code, day, value: v === null || v === undefined ? "" : String(v) });
     }
   }
-  return { degisiklikler, bilinmeyen };
+  return { changes, unknown };
 }
 
 /* ------------------------------------------------------------------ */
-/* Kasa                                                                */
+/* Cash                                                                */
 /* ------------------------------------------------------------------ */
 
-const pbSirali = (...toplamlar) => {
-  const var_ = new Set(toplamlar.flatMap((t) => Object.keys(t || {})));
-  return PB_SIRA.filter((k) => var_.has(k)).concat([...var_].filter((k) => !PB_SIRA.includes(k)));
+const orderedCurrencies = (...totals) => {
+  const present = new Set(totals.flatMap((t) => Object.keys(t || {})));
+  return CURRENCY_ORDER.filter((k) => present.has(k)).concat([...present].filter((k) => !CURRENCY_ORDER.includes(k)));
 };
 
-function bantYaz(sayfa, sutun, metin) {
-  sayfa.mergeCells(1, 1, 1, sutun);
-  const bant = sayfa.getCell(1, 1);
-  bant.value = metin;
-  bant.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
-  bant.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SIYAH } };
-  bant.alignment = { vertical: "middle", indent: 1 };
-  sayfa.getRow(1).height = 26;
+function writeBand(sheet, columns, text) {
+  sheet.mergeCells(1, 1, 1, columns);
+  const band = sheet.getCell(1, 1);
+  band.value = text;
+  band.font = { name: "Calibri", size: 13, bold: true, color: { argb: "FFFFFFFF" } };
+  band.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLACK } };
+  band.alignment = { vertical: "middle", indent: 1 };
+  sheet.getRow(1).height = 26;
 }
 
-function baslikYaz(satir, basliklar) {
-  basliklar.forEach((b, i) => {
-    const h = satir.getCell(i + 1);
+function writeHeader(row, headers) {
+  headers.forEach((b, i) => {
+    const h = row.getCell(i + 1);
     h.value = b;
     h.font = { name: "Calibri", size: 11, bold: true, color: { argb: "FFFFFFFF" } };
-    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TURUNCU } };
+    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ORANGE } };
     h.alignment = { vertical: "middle", indent: 1 };
   });
-  satir.height = 20;
+  row.height = 20;
 }
 
-/** Aylık kasa dosyası: hareketler + özet (devir, gelir, gider, bakiye, kategori dağılımı). */
-export async function kasaYaz(v) {
-  const kitap = new ExcelJS.Workbook();
-  kitap.creator = "KADRO DMS";
-  kitap.created = new Date();
+/** Monthly cash file: movements + summary (carry-over, income, expense, balance, category breakdown). */
+export async function writeCash(v) {
+  const book = new ExcelJS.Workbook();
+  book.creator = "Kadro";
+  book.created = new Date();
 
-  const s = kitap.addWorksheet("Kasa", { views: [{ state: "frozen", ySplit: 2 }] });
-  const sutunlar = [["Tarih", 12], ["Tür", 8], ["Kategori", 20], ["Açıklama", 46], ["Proje", 24], ["Personel", 22],
-    ["Gelir", 13], ["Gider", 13], ["Para Birimi", 10], ["Kaynak", 9], ["Durum", 15]];
-  bantYaz(s, sutunlar.length, `ACME MÜHENDİSLİK — Kasa · ${v.ad}   ·   ${v.satirlar.length} hareket   ·   ${new Date().toLocaleString("tr-TR")}`);
-  baslikYaz(s.getRow(2), sutunlar.map(([b]) => b));
-  sutunlar.forEach(([, g], i) => { s.getColumn(i + 1).width = g; });
+  const s = book.addWorksheet("Cash", { views: [{ state: "frozen", ySplit: 2 }] });
+  const columns = [["Date", 12], ["Type", 9], ["Category", 22], ["Description", 46], ["Project", 24], ["Employee", 22],
+    ["Income", 13], ["Expense", 13], ["Currency", 10], ["Source", 10], ["Status", 17]];
+  writeBand(s, columns.length, `${COMPANY} — Cash · ${v.name}   ·   ${v.rows.length} movements   ·   ${new Date().toLocaleString("en-GB")}`);
+  writeHeader(s.getRow(2), columns.map(([b]) => b));
+  columns.forEach(([, w], i) => { s.getColumn(i + 1).width = w; });
 
-  v.satirlar.forEach((r, i) => {
+  v.rows.forEach((r, i) => {
     const row = s.getRow(i + 3);
-    const tutar = Number(String(r.tutar).replace(",", ".")) || 0;
+    const amount = Number(String(r.amount).replace(",", ".")) || 0;
     row.values = [
-      bicimlendir(r.tarih, "tarih"), r.tur, r.kategori || "", r.aciklama || "",
-      r.projeAd || "", r.personelAd || "",
-      r.tur === "Gelir" ? tutar : null, r.tur === "Gelir" ? null : tutar,
-      r.paraBirimi || "EUR", r.kaynak || "Elle", r.durumEtiketi || "",
+      cellValue(r.date, "date"), r.type, r.category || "", r.description || "",
+      r.projectName || "", r.employeeName || "",
+      r.type === "Income" ? amount : null, r.type === "Income" ? null : amount,
+      r.currency || "EUR", r.source || "Manual", r.statusLabel || "",
     ];
     row.getCell(1).numFmt = "yyyy-mm-dd";
     row.getCell(7).numFmt = "#,##0.00"; row.getCell(8).numFmt = "#,##0.00";
-    if (i % 2 === 1) row.eachCell((h) => { h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACIK } }; });
+    if (i % 2 === 1) row.eachCell((h) => { h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: LIGHT } }; });
   });
-  if (v.satirlar.length) s.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: sutunlar.length } };
+  if (v.rows.length) s.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: columns.length } };
 
-  const o = kitap.addWorksheet("Özet");
-  const z = v.ozet;
-  const pbler = pbSirali(z.devir, z.gelir, z.gider, z.bakiye);
-  bantYaz(o, 1 + Math.max(1, pbler.length), `Kasa özeti · ${v.ad}`);
+  const o = book.addWorksheet("Summary");
+  const z = v.summary;
+  const curs = orderedCurrencies(z.carry, z.income, z.expense, z.balance);
+  writeBand(o, 1 + Math.max(1, curs.length), `Cash summary · ${v.name}`);
   o.getColumn(1).width = 34;
-  pbler.forEach((_, i) => { o.getColumn(i + 2).width = 16; });
-  baslikYaz(o.getRow(3), ["", ...pbler]);
-  const yaz = (no, etiket, t, kalin) => {
+  curs.forEach((_, i) => { o.getColumn(i + 2).width = 16; });
+  writeHeader(o.getRow(3), ["", ...curs]);
+  const put = (no, label, t, bold) => {
     const row = o.getRow(no);
-    row.getCell(1).value = etiket;
-    pbler.forEach((pb, i) => { const h = row.getCell(i + 2); h.value = t?.[pb] || 0; h.numFmt = "#,##0.00"; });
-    if (kalin) row.font = { bold: true };
+    row.getCell(1).value = label;
+    curs.forEach((cur, i) => { const h = row.getCell(i + 2); h.value = t?.[cur] || 0; h.numFmt = "#,##0.00"; });
+    if (bold) row.font = { bold: true };
   };
-  yaz(4, "Devir (önceki aylardan)", z.devir);
-  yaz(5, "Gelir", z.gelir);
-  yaz(6, "Gider", z.gider);
-  yaz(7, "Bakiye (ay sonu)", z.bakiye, true);
+  put(4, "Carried over (previous months)", z.carry);
+  put(5, "Income", z.income);
+  put(6, "Expense", z.expense);
+  put(7, "Balance (month end)", z.balance, true);
 
   let n = 9;
-  baslikYaz(o.getRow(n), ["Kategori dağılımı", ...pbler]);
-  for (const k of z.kategoriler) yaz(++n, `${k.tur} · ${k.kategori}`, k.tutar);
+  writeHeader(o.getRow(n), ["By category", ...curs]);
+  for (const c of z.categories) put(++n, `${c.type} · ${c.category}`, c.amount);
   n += 2;
-  baslikYaz(o.getRow(n), ["Proje (gelir − gider)", ...pbler]);
-  for (const p of z.projeler) yaz(++n, p.ad, p.net);
-  if (v.silinen?.length) {
+  writeHeader(o.getRow(n), ["Project (income − expense)", ...curs]);
+  for (const p of z.projects) put(++n, p.name, p.net);
+  if (v.deleted?.length) {
     n += 2;
-    o.getRow(n).getCell(1).value = `Not: bu ay ${v.silinen.length} otomatik satır elle silindi; dosyada yer almaz.`;
+    o.getRow(n).getCell(1).value = `Note: ${v.deleted.length} automatic rows were deleted by hand this month; they are not in this file.`;
   }
-  return kitap.xlsx.writeBuffer();
+  return book.xlsx.writeBuffer();
 }
 
-/** Kasa raporu: her kova bir satır, her para birimi için devir / gelir / gider / bakiye. */
-export async function kasaRaporYaz(r, baslik) {
-  const kitap = new ExcelJS.Workbook();
-  kitap.creator = "KADRO DMS";
-  kitap.created = new Date();
-  const pbler = pbSirali(r.toplam.devir, r.toplam.gelir, r.toplam.gider, r.toplam.bakiye,
-    ...r.kovalar.flatMap((k) => [k.devir, k.gelir, k.gider]));
-  const alanlar = [["devir", "Devir"], ["gelir", "Gelir"], ["gider", "Gider"], ["net", "Net"], ["bakiye", "Bakiye"]];
+/** Cash report: one row per bucket, carry-over / income / expense / balance per currency. */
+export async function writeCashReport(r, title) {
+  const book = new ExcelJS.Workbook();
+  book.creator = "Kadro";
+  book.created = new Date();
+  const curs = orderedCurrencies(r.total.carry, r.total.income, r.total.expense, r.total.balance,
+    ...r.buckets.flatMap((b) => [b.carry, b.income, b.expense]));
+  const fields = [["carry", "Carry-over"], ["income", "Income"], ["expense", "Expense"], ["net", "Net"], ["balance", "Balance"]];
 
-  const s = kitap.addWorksheet("Rapor", { views: [{ state: "frozen", xSplit: 1, ySplit: 3 }] });
-  const sutun = 1 + pbler.length * alanlar.length;
-  bantYaz(s, Math.max(2, sutun), `ACME MÜHENDİSLİK — ${baslik}`);
+  const s = book.addWorksheet("Report", { views: [{ state: "frozen", xSplit: 1, ySplit: 3 }] });
+  const width = 1 + curs.length * fields.length;
+  writeBand(s, Math.max(2, width), `${COMPANY} — ${title}`);
   s.getColumn(1).width = 30;
-  // 2. satır: para birimi, 3. satır: alan
-  pbler.forEach((pb, i) => {
-    const c = 2 + i * alanlar.length;
-    s.mergeCells(2, c, 2, c + alanlar.length - 1);
+  // Row 2: currency, row 3: field
+  curs.forEach((cur, i) => {
+    const c = 2 + i * fields.length;
+    s.mergeCells(2, c, 2, c + fields.length - 1);
     const h = s.getCell(2, c);
-    h.value = pb;
+    h.value = cur;
     h.font = { bold: true, color: { argb: "FFFFFFFF" } };
-    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SIYAH } };
+    h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLACK } };
     h.alignment = { horizontal: "center" };
   });
-  baslikYaz(s.getRow(3), [r.tur === "proje" ? "Proje" : "Dönem", ...pbler.flatMap(() => alanlar.map(([, b]) => b))]);
-  for (let c = 2; c <= sutun; c += 1) s.getColumn(c).width = 13;
+  writeHeader(s.getRow(3), [r.type === "project" ? "Project" : "Period", ...curs.flatMap(() => fields.map(([, b]) => b))]);
+  for (let c = 2; c <= width; c += 1) s.getColumn(c).width = 13;
 
-  const satirYaz = (no, etiket, k, kalin) => {
+  const writeRow = (no, label, b, bold) => {
     const row = s.getRow(no);
-    row.getCell(1).value = etiket;
-    pbler.forEach((pb, i) => alanlar.forEach(([a], j) => {
-      const h = row.getCell(2 + i * alanlar.length + j);
-      h.value = k[a]?.[pb] || 0;
+    row.getCell(1).value = label;
+    curs.forEach((cur, i) => fields.forEach(([f], j) => {
+      const h = row.getCell(2 + i * fields.length + j);
+      h.value = b[f]?.[cur] || 0;
       h.numFmt = "#,##0.00";
     }));
-    if (kalin) row.font = { bold: true };
+    if (bold) row.font = { bold: true };
   };
-  r.kovalar.forEach((k, i) => satirYaz(4 + i, k.ad, k));
-  satirYaz(5 + r.kovalar.length, "TOPLAM", r.toplam, true);
+  r.buckets.forEach((b, i) => writeRow(4 + i, b.name, b));
+  writeRow(5 + r.buckets.length, "TOTAL", r.total, true);
 
-  const kt = kitap.addWorksheet("Kategoriler");
-  kt.getColumn(1).width = 34;
-  baslikYaz(kt.getRow(1), ["Kategori", ...pbler]);
-  r.toplam.kategoriler.forEach((k, i) => {
-    const row = kt.getRow(2 + i);
-    row.getCell(1).value = `${k.tur} · ${k.kategori}`;
-    pbler.forEach((pb, j) => { row.getCell(2 + j).value = k.tutar[pb] || 0; row.getCell(2 + j).numFmt = "#,##0.00"; });
+  const ct = book.addWorksheet("Categories");
+  ct.getColumn(1).width = 34;
+  writeHeader(ct.getRow(1), ["Category", ...curs]);
+  r.total.categories.forEach((c, i) => {
+    const row = ct.getRow(2 + i);
+    row.getCell(1).value = `${c.type} · ${c.category}`;
+    curs.forEach((cur, j) => { row.getCell(2 + j).value = c.amount[cur] || 0; row.getCell(2 + j).numFmt = "#,##0.00"; });
   });
 
-  const pr = kitap.addWorksheet("Projeler");
+  const pr = book.addWorksheet("Projects");
   pr.getColumn(1).width = 34;
-  baslikYaz(pr.getRow(1), ["Proje", ...pbler.flatMap((pb) => [`Gelir ${pb}`, `Gider ${pb}`, `Net ${pb}`])]);
-  r.toplam.projeler.forEach((p, i) => {
+  writeHeader(pr.getRow(1), ["Project", ...curs.flatMap((cur) => [`Income ${cur}`, `Expense ${cur}`, `Net ${cur}`])]);
+  r.total.projects.forEach((p, i) => {
     const row = pr.getRow(2 + i);
-    row.getCell(1).value = p.ad;
-    pbler.forEach((pb, j) => ["gelir", "gider", "net"].forEach((a, m) => {
-      const h = row.getCell(2 + j * 3 + m); h.value = p[a][pb] || 0; h.numFmt = "#,##0.00";
+    row.getCell(1).value = p.name;
+    curs.forEach((cur, j) => ["income", "expense", "net"].forEach((f, m) => {
+      const h = row.getCell(2 + j * 3 + m); h.value = p[f][cur] || 0; h.numFmt = "#,##0.00";
     }));
   });
-  return kitap.xlsx.writeBuffer();
+  return book.xlsx.writeBuffer();
 }
 
 /* ------------------------------------------------------------------ */
-/* Öngörü                                                              */
+/* Forecast                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Öngörü tablosu: her para birimi ayrı sayfa, sütunlar dönemler. Gerçekleşen sütunlar gri, elle düzeltilen hücre sarı. */
-export async function ongoruYaz(v) {
-  const kitap = new ExcelJS.Workbook();
-  kitap.creator = "KADRO DMS";
-  kitap.created = new Date();
-  const GRI = "FFE7E0D9", SARI = "FFFCEEDC";
+/** Forecast table: one sheet per currency, columns are periods. Actual columns grey, hand-corrected cells yellow. */
+export async function writeForecast(v) {
+  const book = new ExcelJS.Workbook();
+  book.creator = "Kadro";
+  book.created = new Date();
+  const GREY = "FFE7E0D9", YELLOW = "FFFCEEDC";
 
-  for (const pb of v.pbler) {
-    const s = kitap.addWorksheet(`Öngörü ${pb}`, { views: [{ state: "frozen", xSplit: 1, ySplit: 4 }] });
-    const sutun = 1 + v.sutunlar.length;
-    bantYaz(s, sutun, `ACME MÜHENDİSLİK — Öngörü · ${pb} · ${v.projeAd}   ·   ${new Date().toLocaleDateString("tr-TR")}`);
+  for (const cur of v.currencies) {
+    const s = book.addWorksheet(`Forecast ${cur}`, { views: [{ state: "frozen", xSplit: 1, ySplit: 4 }] });
+    const width = 1 + v.columns.length;
+    writeBand(s, width, `${COMPANY} — Forecast · ${cur} · ${v.projectName}   ·   ${new Date().toLocaleDateString("en-GB")}`);
     s.getColumn(1).width = 26;
-    v.sutunlar.forEach((c, i) => {
+    v.columns.forEach((c, i) => {
       const n = i + 2;
       s.getColumn(n).width = 13;
-      const ay = s.getCell(2, n), yari = s.getCell(3, n), durum = s.getCell(4, n);
-      ay.value = c.ay; yari.value = `${c.yari}. yarı (${c.aralik})`; durum.value = c.durum === "gercek" ? "gerçekleşen" : "tahmin";
-      for (const h of [ay, yari, durum]) {
-        h.font = { bold: h !== durum, size: 10, color: { argb: c.durum === "gercek" ? SIYAH : "FFFFFFFF" } };
-        h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c.durum === "gercek" ? GRI : TURUNCU } };
+      const month = s.getCell(2, n), half = s.getCell(3, n), state = s.getCell(4, n);
+      month.value = c.month; half.value = `${c.half === 1 ? "1st" : "2nd"} half (${c.range})`; state.value = c.state === "actual" ? "actual" : "estimate";
+      for (const h of [month, half, state]) {
+        h.font = { bold: h !== state, size: 10, color: { argb: c.state === "actual" ? BLACK : "FFFFFFFF" } };
+        h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c.state === "actual" ? GREY : ORANGE } };
         h.alignment = { horizontal: "center" };
       }
     });
-    s.getCell(4, 1).value = "Kalem"; s.getCell(4, 1).font = { bold: true };
+    s.getCell(4, 1).value = "Item"; s.getCell(4, 1).font = { bold: true };
 
     let r = 5;
-    const yaz = (etiket, hucre, kalin) => {
+    const put = (label, cell, bold) => {
       const row = s.getRow(r++);
-      row.getCell(1).value = etiket;
-      if (kalin) row.font = { bold: true };
-      v.sutunlar.forEach((c, i) => {
+      row.getCell(1).value = label;
+      if (bold) row.font = { bold: true };
+      v.columns.forEach((c, i) => {
         const h = row.getCell(i + 2);
-        const x = hucre(c);
-        h.value = x?.deger ?? x ?? 0;
+        const x = cell(c);
+        h.value = x?.value ?? x ?? 0;
         h.numFmt = "#,##0.00";
-        if (c.durum === "gercek") h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ACIK } };
-        if (x?.elle) { h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: SARI } }; h.note = `Elle düzeltildi. Sistemin hesabı: ${x.sistem}`; }
+        if (c.state === "actual") h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: LIGHT } };
+        if (x?.manual) { h.fill = { type: "pattern", pattern: "solid", fgColor: { argb: YELLOW } }; h.note = `Corrected by hand. System's figure: ${x.system}`; }
       });
     };
-    for (const k of v.satirlar.filter((x) => x.tur === "gider")) yaz(k.ad, (c) => v.degerler[k.k][c.donem]?.[pb]);
-    yaz("Toplam gider", (c) => v.toplam.gider[c.donem][pb], true);
-    yaz("Gelirler", (c) => v.degerler.gelir[c.donem]?.[pb]);
-    yaz("Net (gelir − gider)", (c) => v.toplam.net[c.donem][pb], true);
-    yaz("Kasa bakiyesi", (c) => v.toplam.bakiye[c.donem][pb], true);
+    for (const k of v.rows.filter((x) => x.kind === "expense")) put(k.name, (c) => v.values[k.key][c.period]?.[cur]);
+    put("Total expense", (c) => v.totals.expense[c.period][cur], true);
+    put("Income", (c) => v.values.income[c.period]?.[cur]);
+    put("Net (income − expense)", (c) => v.totals.net[c.period][cur], true);
+    put("Cash balance", (c) => v.totals.balance[c.period][cur], true);
   }
 
-  const k = kitap.addWorksheet("Kaynaklar");
+  const k = book.addWorksheet("Sources");
   k.getColumn(1).width = 18; k.getColumn(2).width = 60; k.getColumn(3).width = 80;
-  baslikYaz(k.getRow(1), ["Kalem", "Gerçekleşen", "Tahmin"]);
-  v.satirlar.forEach((x, i) => { k.getRow(i + 2).values = [x.ad, x.gercek, x.tahmin]; });
-  k.getRow(v.satirlar.length + 3).values = ["Kasa bakiyesi", "Kasadaki gerçek bakiye (dönem sonu)", "Bir önceki dönemin bakiyesi + tahmini net"];
-  return kitap.xlsx.writeBuffer();
+  writeHeader(k.getRow(1), ["Item", "Actual", "Estimate"]);
+  v.rows.forEach((x, i) => { k.getRow(i + 2).values = [x.name, x.actual, x.estimate]; });
+  k.getRow(v.rows.length + 3).values = ["Cash balance", "The real balance in cash (end of period)", "Previous period's balance + estimated net"];
+  return book.xlsx.writeBuffer();
 }

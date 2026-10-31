@@ -1,6 +1,6 @@
 /**
- * ACME MÜHENDİSLİK — Belge Yönetim Sistemi
- * Lokal sunucu. Çift tıkla baslat.bat ile açılır, tarayıcıda çalışır.
+ * Kadro — Workforce Management (ACME ENGINEERING)
+ * Local server. Started by start.bat, runs in the browser.
  */
 import express from "express";
 import multer from "multer";
@@ -12,1008 +12,999 @@ import { exec, execSync } from "node:child_process";
 import sea from "node:sea";
 
 import * as db from "./src/db.js";
-import * as klasor from "./src/klasor.js";
+import * as folders from "./src/folders.js";
 import * as excel from "./src/excel.js";
-import { siniflandir, kuralIle, onerilenAd } from "./src/siniflandirici.js";
-import { TABLOLAR, sonrakiKod, KODLU } from "./src/tablolar.js";
-import * as iliski from "./src/iliskiler.js";
-import * as puantaj from "./src/puantaj.js";
-import * as kasa from "./src/kasa.js";
-import * as ongoru from "./src/ongoru.js";
-import * as odeme from "./src/odeme.js";
-import * as kurlar from "./src/kur.js";
-import * as calisan from "./src/calisan.js";
-import * as asistan from "./src/asistan.js";
-import * as kontrat from "./src/kontrat.js";
-import * as notlar from "./src/notlar.js";
-import { duzYapi, SABLONLAR } from "./src/yapi.js";
+import { classify, byRules, suggestedName } from "./src/classifier.js";
+import { TABLES, nextCode, CODED } from "./src/tables.js";
+import * as relations from "./src/relations.js";
+import * as timesheet from "./src/timesheet.js";
+import * as cash from "./src/cash.js";
+import * as forecast from "./src/forecast.js";
+import * as payments from "./src/payments.js";
+import * as rates from "./src/rates.js";
+import * as employeeView from "./src/employee-view.js";
+import * as assistant from "./src/assistant.js";
+import * as contracts from "./src/contracts.js";
+import * as notes from "./src/notes.js";
+import { flatTree, TEMPLATES } from "./src/structure.js";
 
-// KADRO.exe olarak paketlendiğinde (bkz. paketle.mjs) arayüz exe'nin içinden okunur,
-// veriler exe nerede olursa olsun Belgeler\KADRO altında tutulur.
-const PAKETLI = sea.isSea();
+// When packaged as KADRO.exe (see build.mjs) the UI is read from inside the exe,
+// and data lives under Documents\KADRO wherever the exe is.
+const PACKAGED = sea.isSea();
 
-function belgelerKlasoru() {
+function documentsFolder() {
   try {
-    const yol = execSync(`powershell -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"`,
+    const p = execSync(`powershell -NoProfile -Command "[Environment]::GetFolderPath('MyDocuments')"`,
       { encoding: "utf8", windowsHide: true }).trim();
-    if (yol && fs.existsSync(yol)) return yol;
+    if (p && fs.existsSync(p)) return p;
   } catch {}
   return path.join(os.homedir(), "Documents");
 }
 
-// KADRO_KLASOR: test için veriyi başka bir klasörde tutar (gerçek Belgeler\KADRO verisine dokunmadan).
-const BURASI = process.env.KADRO_KLASOR
-  ? path.resolve(process.env.KADRO_KLASOR)
-  : PAKETLI
-    ? path.join(belgelerKlasoru(), "KADRO")
+// KADRO_FOLDER: keeps the data in another folder for testing (without touching the real Documents\KADRO data).
+const HOME = process.env.KADRO_FOLDER
+  ? path.resolve(process.env.KADRO_FOLDER)
+  : PACKAGED
+    ? path.join(documentsFolder(), "KADRO")
     : path.dirname(fileURLToPath(import.meta.url));
-const VERI_DIZINI = path.join(BURASI, "veri");
-const GECICI_DIZIN = path.join(VERI_DIZINI, "gecici");
+const DATA_DIR = path.join(HOME, "data");
+const TMP_DIR = path.join(DATA_DIR, "tmp");
 const PORT = Number(process.env.PORT) || 4360;
-const SURUM = "2.5.2";
+const VERSION = "2.5.2";
 
-fs.mkdirSync(GECICI_DIZIN, { recursive: true });
-db.baslat(VERI_DIZINI);
+fs.mkdirSync(TMP_DIR, { recursive: true });
+db.init(DATA_DIR);
 
-// Güncelleme: yeni sürüm ilk açıldığında, veriyi kendi biçimine çevirmeden önce yedek alınır (veri/yedekler).
-// Müşteri sadece exe'yi değiştirir; kayıtlar Belgeler\KADRO'da kalır, bir sorun olursa bu yedekten dönülür.
-const oncekiSurum = db.ayarlar().surum || null;
-if (oncekiSurum !== SURUM && db.tablo("personel").length) {
-  try { console.log(`  Güncelleme yedeği: ${db.yedekAl(`guncellemeden-once-${oncekiSurum || "eski"}`)}`); }
-  catch (e) { console.error(`[güncelleme yedeği] alınamadı: ${e.message}`); }
+// Update: the first time a new version starts, the data is backed up before it is migrated (data/backups).
+// The client only replaces the exe; records stay in Documents\KADRO and this backup is the way back if anything goes wrong.
+const previousVersion = db.settings().version || null;
+if (previousVersion !== VERSION && db.table("employees").length) {
+  try { console.log(`  Update backup: ${db.backup(`before-update-${previousVersion || "old"}`)}`); }
+  catch (e) { console.error(`[update backup] failed: ${e.message}`); }
 }
 
-/** Açılışta ve yedekten yüklemede çalışır: eski sürüm verisini günceller, kasayı kaynaklarıyla eşitler. */
-function veriyiHazirla() {
-  // v1 → v2: eski zimmet kayıtları kişisel zimmet olarak kalır.
-  let degisti = false;
-  for (const z of db.tablo("zimmet")) {
-    if (!z.sahipTuru) { z.sahipTuru = "Kişi"; z.ekipKod = z.ekipKod || ""; degisti = true; }
+/** Runs at startup and after a restore: migrates older data, syncs cash with its sources. */
+function prepareData() {
+  // v1 → v2: old equipment records stay as personal equipment.
+  let changed = false;
+  for (const e of db.table("equipment")) {
+    if (!e.ownerType) { e.ownerType = "Person"; e.crewCode = e.crewCode || ""; changed = true; }
   }
-  if (degisti) db.yaz();
-  // v2.5: personelin tek satırlık notu, Notlar paneline "Genel not" olarak taşınır.
-  try { notlar.eskiNotlariTasi(); } catch (e) { console.error(`[notlar] taşınamadı: ${e.message}`); }
-  // Çalışma dönemi olan kişilerin durumu ve açık puantajlardaki aralık kopyaları.
-  try { kontrat.esitle(); } catch (e) { console.error(`[kontrat] eşitlenemedi: ${e.message}`); }
-  // Kasanın otomatik satırlarını (avans, maaş, yemek, kira) kaynaklarıyla eşitle.
-  try { return kasa.esitle(); } catch (e) { console.error(`[kasa] eşitlenemedi: ${e.message}`); return null; }
+  if (changed) db.save();
+  // v2.5: an employee's single-line note moves to the Notes panel as a "General note".
+  try { notes.migrateOldNotes(); } catch (e) { console.error(`[notes] could not migrate: ${e.message}`); }
+  // Statuses of people with employment periods, and the range copies in open timesheets.
+  try { contracts.sync(); } catch (e) { console.error(`[contracts] could not sync: ${e.message}`); }
+  // Sync the automatic cash rows (advances, salary, meals, rent) with their sources.
+  try { return cash.sync(); } catch (e) { console.error(`[cash] could not sync: ${e.message}`); return null; }
 }
-veriyiHazirla();
-if (oncekiSurum !== SURUM) db.ayarKaydet({ surum: SURUM });
+prepareData();
+if (previousVersion !== VERSION) db.saveSettings({ version: VERSION });
 
-// Belge kökü ilk açılışta uygulama klasörünün yanına kurulur.
-if (!db.ayarlar().belgeKoku) {
-  db.ayarKaydet({ belgeKoku: path.join(BURASI, "ACME MUHENDISLIK") });
+// The document root is created next to the app on first start.
+if (!db.settings().documentRoot) {
+  db.saveSettings({ documentRoot: path.join(HOME, "ACME ENGINEERING") });
 }
-const kok = () => db.ayarlar().belgeKoku;
+const root = () => db.settings().documentRoot;
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
-// Veriyi değiştiren her istekten sonra aylık kasa dosyaları tazelenir (sadece değişen aylar yazılır).
+// After every request that changes data, the monthly cash files are refreshed (only changed months are written).
 app.use((req, res, next) => {
-  if (req.method !== "GET" && req.path.startsWith("/api/")) res.on("finish", kasaDosyalariniZamanla);
+  if (req.method !== "GET" && req.path.startsWith("/api/")) res.on("finish", scheduleCashFiles);
   next();
 });
-if (PAKETLI) {
+if (PACKAGED) {
   app.use((req, res, next) => {
-    const ad = req.path === "/" ? "index.html" : req.path.slice(1);
-    if (!["index.html", "app.js", "style.css"].includes(ad)) return next();
-    res.type(path.extname(ad)).send(Buffer.from(sea.getAsset(ad)));
+    const name = req.path === "/" ? "index.html" : req.path.slice(1);
+    if (!["index.html", "app.js", "style.css"].includes(name)) return next();
+    res.type(path.extname(name)).send(Buffer.from(sea.getAsset(name)));
   });
 } else {
-  app.use(express.static(path.join(BURASI, "public")));
+  app.use(express.static(path.join(HOME, "public")));
 }
 
-const yukleyici = multer({
+const upload = multer({
   storage: multer.diskStorage({
-    destination: (_r, _f, cb) => cb(null, GECICI_DIZIN),
+    destination: (_r, _f, cb) => cb(null, TMP_DIR),
     filename: (_r, _f, cb) => cb(null, `up_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
   }),
   limits: { fileSize: 200 * 1024 * 1024, files: 30 },
 });
 
-/** Yüklenip henüz yerleştirilmemiş dosyalar. */
-const bekleyen = new Map();
+/** Uploaded files not filed yet. */
+const pending = new Map();
 
-// Not: fn senkron da throw edebilir; async sarmalayıcı ikisini de yakalar.
-// (Promise.resolve(fn(...)) senkron hatayı kaçırır ve Express HTML 500 döndürür.)
-const sar = (fn) => async (req, res) => {
+// Note: fn may also throw synchronously; the async wrapper catches both.
+// (Promise.resolve(fn(...)) misses a synchronous throw and Express answers with an HTML 500.)
+const wrap = (fn) => async (req, res) => {
   try {
     await fn(req, res);
   } catch (e) {
-    console.error(`[hata] ${req.method} ${req.path} — ${e.message}`);
-    if (!res.headersSent) res.status(400).json({ hata: e.message });
+    console.error(`[error] ${req.method} ${req.path} — ${e.message}`);
+    if (!res.headersSent) res.status(400).json({ error: e.message });
   }
 };
 
 /* ------------------------------------------------------------------ */
-/* Durum ve ayarlar                                                    */
+/* Status and settings                                                 */
 /* ------------------------------------------------------------------ */
 
-app.get("/api/durum", sar((_req, res) => {
-  const a = db.ayarlar();
-  const kurulu = fs.existsSync(kok());
+app.get("/api/status", wrap((_req, res) => {
+  const s = db.settings();
+  const built = fs.existsSync(root());
   res.json({
-    belgeKoku: kok(),
-    kurulu,
-    aiModu: a.aiModu,
-    esik: a.esik,
-    kullanici: a.kullanici,
-    kur: kurlar.kurAyari(),
-    apiAnahtariVar: Boolean(a.apiAnahtari || process.env.ANTHROPIC_API_KEY),
-    apiKaynagi: a.apiAnahtari ? "ayarlar" : (process.env.ANTHROPIC_API_KEY ? "ortam degiskeni" : null),
-    asistan: { hazir: asistan.ayar().hazir, adres: a.asistanAdres || "", varsayilanAdres: asistan.VARSAYILAN_ADRES, anahtarVar: Boolean(a.asistanAnahtari), gomulu: asistan.gomuluAnahtarVar },
-    sayilar: {
-      personel: db.tablo("personel").length,
-      zimmet: db.tablo("zimmet").filter((z) => z.durum === "Zimmetli").length,
-      ekip: db.tablo("ekip").filter((e) => e.durum !== "Pasif").length,
-      arac: db.tablo("arac").length,
-      proje: db.tablo("proje").filter((p) => p.durum === "Devam Ediyor").length,
-      ev: db.tablo("ev").filter((e) => e.durum !== "Boşaltıldı").length,
-      avans: db.tablo("avans").length,
-      kontrat: db.tablo("kontrat").filter((r) => ["Sürüyor", "İzinde", "Başlamadı"].includes(kontrat.kayitDurumu(r))).length,
-      kasa: db.tablo("kasa").length,
-      odemeBekleyen: bekleyenOdeme(),
-      musteri: db.tablo("musteri").length,
-      belge: db.tablo("belge").length,
+    documentRoot: root(),
+    built,
+    aiMode: s.aiMode,
+    threshold: s.threshold,
+    user: s.user,
+    rates: rates.rateSettings(),
+    apiKeySet: Boolean(s.apiKey || process.env.ANTHROPIC_API_KEY),
+    apiKeySource: s.apiKey ? "settings" : (process.env.ANTHROPIC_API_KEY ? "environment variable" : null),
+    assistant: { ready: assistant.config().ready, url: s.assistantUrl || "", defaultUrl: assistant.DEFAULT_URL, keySet: Boolean(s.assistantKey), embedded: assistant.hasEmbeddedKey },
+    counts: {
+      employees: db.table("employees").length,
+      equipment: db.table("equipment").filter((e) => e.status === "Issued").length,
+      crews: db.table("crews").filter((c) => c.status !== "Inactive").length,
+      vehicles: db.table("vehicles").length,
+      projects: db.table("projects").filter((p) => p.status === "In progress").length,
+      houses: db.table("houses").filter((h) => h.status !== "Vacated").length,
+      advances: db.table("advances").length,
+      contracts: db.table("contracts").filter((r) => ["Ongoing", "On leave", "Not started"].includes(contracts.recordStatus(r))).length,
+      cash: db.table("cash").length,
+      paymentsDue: paymentsDue(),
+      clients: db.table("clients").length,
+      documents: db.table("documents").length,
     },
-    surum: SURUM,
+    version: VERSION,
     port: PORT,
   });
 }));
 
-app.post("/api/ayarlar", sar((req, res) => {
-  const izinli = ["belgeKoku", "apiAnahtari", "aiModu", "kullanici", "esik", "asistanAdres", "asistanAnahtari"];
-  const yeni = {};
-  for (const k of izinli) if (k in req.body) yeni[k] = req.body[k];
-  if (yeni.belgeKoku) yeni.belgeKoku = path.resolve(String(yeni.belgeKoku));
-  if ("asistanAdres" in yeni) {
-    const adres = String(yeni.asistanAdres || "").trim().replace(/\/+$/, "");
-    if (adres && !/^https:\/\/[^\s/]+/.test(adres)) throw new Error("Asistan adresi https:// ile başlamalı (ör. https://n8n.ornek.com).");
-    yeni.asistanAdres = adres;
+app.post("/api/settings", wrap((req, res) => {
+  const allowed = ["documentRoot", "apiKey", "aiMode", "user", "threshold", "assistantUrl", "assistantKey"];
+  const changes = {};
+  for (const k of allowed) if (k in req.body) changes[k] = req.body[k];
+  if (changes.documentRoot) changes.documentRoot = path.resolve(String(changes.documentRoot));
+  if ("assistantUrl" in changes) {
+    const url = String(changes.assistantUrl || "").trim().replace(/\/+$/, "");
+    if (url && !/^https:\/\/[^\s/]+/.test(url)) throw new Error("The assistant address must start with https:// (e.g. https://n8n.example.com).");
+    changes.assistantUrl = url;
   }
-  if ("asistanAnahtari" in yeni) yeni.asistanAnahtari = String(yeni.asistanAnahtari || "").trim();
-  if (yeni.esik !== undefined) yeni.esik = Math.max(0, Math.min(1, Number(yeni.esik) || 0.72));
-  // Kur: 1 ana para birimi = x diğer. Açılmış puantaj dönemleri kendi kurunu korur.
-  if ("kur" in req.body) yeni.kur = kurlar.dogrula(req.body.kur);
-  res.json(db.ayarKaydet(yeni));
+  if ("assistantKey" in changes) changes.assistantKey = String(changes.assistantKey || "").trim();
+  if (changes.threshold !== undefined) changes.threshold = Math.max(0, Math.min(1, Number(changes.threshold) || 0.72));
+  // Rates: 1 base currency = x of another. Opened timesheet periods keep their own rates.
+  if ("rates" in req.body) changes.rates = rates.validate(req.body.rates);
+  res.json(db.saveSettings(changes));
 }));
 
-app.post("/api/kur", sar((_req, res) => res.json(klasor.yapiyiKur(kok()))));
+app.post("/api/build", wrap((_req, res) => res.json(folders.buildStructure(root()))));
 
-/* Yedek: tüm kayıtlar tek .json dosyası. Belgeler (klasörler) yedeğe girmez. */
+/* Backup: every record in one .json file. Documents (folders) are not part of it. */
 
-app.get("/api/yedek", sar((_req, res) => {
-  const tarih = new Date().toISOString().slice(0, 10);
-  const icerik = JSON.stringify({ uygulama: "KADRO DMS", surum: SURUM, tarih: new Date().toISOString(), veri: db.disaAktar() }, null, 2);
+app.get("/api/backup", wrap((_req, res) => {
+  const date = new Date().toISOString().slice(0, 10);
+  const body = JSON.stringify({ app: "Kadro", version: VERSION, date: new Date().toISOString(), data: db.exportData() }, null, 2);
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`KADRO yedek ${tarih}.json`)}`);
-  res.end(icerik);
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`Kadro backup ${date}.json`)}`);
+  res.end(body);
 }));
 
-app.post("/api/yedek", yukleyici.single("dosya"), sar((req, res) => {
-  if (!req.file) throw new Error("Dosya gelmedi.");
-  let gelen;
-  try { gelen = JSON.parse(fs.readFileSync(req.file.path, "utf8").replace(/^﻿/, "")); }
-  catch { throw new Error("Dosya okunamadı. Sistemden indirilen bir KADRO yedeği (.json) seçin."); }
+app.post("/api/backup", upload.single("file"), wrap((req, res) => {
+  if (!req.file) throw new Error("No file received.");
+  let incoming;
+  try { incoming = JSON.parse(fs.readFileSync(req.file.path, "utf8").replace(/^﻿/, "")); }
+  catch { throw new Error("The file could not be read. Choose a Kadro backup (.json) downloaded from the system."); }
   finally { try { fs.unlinkSync(req.file.path); } catch {} }
-  // Hem sistemin indirdiği paket hem de düz db.json kabul edilir.
-  const eskiYedek = db.iceAktar(gelen?.uygulama === "KADRO DMS" ? gelen.veri : gelen);
-  const kasaRaporu = veriyiHazirla();
-  const sayilar = Object.fromEntries(["personel", "ekip", "zimmet", "proje", "ev", "arac", "musteri", "avans", "kasa", "puantaj", "belge"]
-    .map((k) => [k, db.tablo(k).length]));
-  res.json({ sayilar, eskiYedek: path.relative(BURASI, eskiYedek), kasa: kasaRaporu });
+  // Both the package the system downloads and a plain db.json are accepted.
+  const previousBackup = db.importData(incoming?.app === "Kadro" ? incoming.data : incoming);
+  const cashReport = prepareData();
+  const counts = Object.fromEntries(["employees", "crews", "equipment", "projects", "houses", "vehicles", "clients", "advances", "cash", "timesheets", "documents"]
+    .map((k) => [k, db.table(k).length]));
+  res.json({ counts, previousBackup: path.relative(HOME, previousBackup), cash: cashReport });
 }));
 
 /**
- * Tüm kayıtları sıfırlar. Önce veri/yedekler'e yedek alınır; ayarlar kalır.
- * belgeler: true ise belge klasörü silinmez, "(eski tarih)" adıyla kenara alınır ve boş yapı yeniden kurulur.
+ * Resets every record. A backup goes to data/backups first; settings stay.
+ * documents: true moves the document folder aside as "(old date)" instead of deleting it and builds an empty structure.
  */
-app.post("/api/sifirla", sar((req, res) => {
-  if (req.body?.onay !== "SİL") throw new Error('Onay için "SİL" yazılmalı.');
-  // Önce belge klasörü: açık bir dosya yüzünden kenara alınamazsa hiçbir kayıt silinmez.
-  const eskiKok = req.body.belgeler ? klasor.kokuKenaraAl(kok()) : null;
-  const yedek = db.sifirla();
-  for (const k of bekleyen.values()) { try { fs.unlinkSync(k.yol); } catch {} }
-  bekleyen.clear();
-  kasaImza.clear(); kasaDosyaHatasi.clear();
-  if (eskiKok) klasor.yapiyiKur(kok());
-  res.json({ yedek: path.relative(BURASI, yedek), eskiKok });
+app.post("/api/reset", wrap((req, res) => {
+  if (req.body?.confirm !== "DELETE") throw new Error('Type "DELETE" to confirm.');
+  // Document folder first: if an open file stops it from moving, no record is deleted.
+  const oldRoot = req.body.documents ? folders.setRootAside(root()) : null;
+  const backup = db.reset();
+  for (const p of pending.values()) { try { fs.unlinkSync(p.path); } catch {} }
+  pending.clear();
+  cashSignature.clear(); cashFileError.clear();
+  if (oldRoot) folders.buildStructure(root());
+  res.json({ backup: path.relative(HOME, backup), oldRoot });
 }));
 
 /* ------------------------------------------------------------------ */
-/* Klasör ağacı                                                        */
+/* Folder tree                                                         */
 /* ------------------------------------------------------------------ */
 
-app.get("/api/agac", sar((_req, res) => res.json(klasor.agacTara(kok()))));
+app.get("/api/tree", wrap((_req, res) => res.json(folders.scanTree(root()))));
 
-app.get("/api/yapi", sar((_req, res) => res.json({ duz: duzYapi(), sablon: SABLONLAR })));
+app.get("/api/structure", wrap((_req, res) => res.json({ flat: flatTree(), templates: TEMPLATES })));
 
-app.get("/api/hedefler", sar((_req, res) => res.json(klasor.hedefKlasorler(kok()))));
+app.get("/api/targets", wrap((_req, res) => res.json(folders.targetFolders(root()))));
 
-app.post("/api/klasor-ac", sar((req, res) => {
-  const tam = klasor.klasorAcExplorer(kok(), req.body.yol || "");
-  if (!fs.existsSync(tam)) return res.status(404).json({ hata: "Klasör diskte yok. Önce Yapıyı Kur deyin." });
-  if (process.platform === "win32") exec(`explorer "${tam}"`);
-  else if (process.platform === "darwin") exec(`open "${tam}"`);
-  else exec(`xdg-open "${tam}"`);
-  res.json({ acildi: tam });
+app.post("/api/open-folder", wrap((req, res) => {
+  const full = folders.explorerPath(root(), req.body.path || "");
+  if (!fs.existsSync(full)) return res.status(404).json({ error: "The folder is not on disk. Press Build Folder Structure first." });
+  if (process.platform === "win32") exec(`explorer "${full}"`);
+  else if (process.platform === "darwin") exec(`open "${full}"`);
+  else exec(`xdg-open "${full}"`);
+  res.json({ opened: full });
 }));
 
-/* Belge silme: dosya "_Silinenler"e taşınır, Belge Defteri'ne not düşülür. Geri yüklenebilir. */
+/* Deleting documents: the file moves to "_Deleted" and the Document Register gets a note. It can be restored. */
 
-const simdi = () => new Date().toLocaleString("tr-TR");
+const now = () => new Date().toLocaleString("en-GB");
 
-app.post("/api/belge/sil", sar((req, res) => {
-  const { klasor: yol, ad } = req.body || {};
-  const sonuc = klasor.dosyaSil(kok(), yol, ad);
-  const durum = `Silindi ${simdi()} · ${db.ayarlar().kullanici} · Silinenler'de`;
-  // Defterdeki en son kaydı işaretle; defterde yoksa (elle konmuş dosya) silme kaydı açılır.
-  const kayit = db.tablo("belge").filter((b) => b.hedefYol === yol && b.dosyaAdi === ad && !b.silinenYol).at(-1);
-  if (kayit) db.satirGuncelle("belge", kayit._id, { durum, silinenYol: sonuc.yol });
+app.post("/api/document/delete", wrap((req, res) => {
+  const { folder, name } = req.body || {};
+  const result = folders.deleteFile(root(), folder, name);
+  const status = `Deleted ${now()} · ${db.settings().user} · in Deleted`;
+  // Mark the latest log entry; if there is none (a file put there by hand) a deletion entry is created.
+  const entry = db.table("documents").filter((d) => d.targetPath === folder && d.fileName === name && !d.deletedPath).at(-1);
+  if (entry) db.updateRow("documents", entry._id, { status, deletedPath: result.path });
   else {
-    db.satirEkle("belge", {
-      tarih: simdi(), dosyaAdi: ad, hedefYol: yol, belgeTuru: "", ilgili: "", yontem: "Elle", guven: "—", boyut: "",
-      kullanici: db.ayarlar().kullanici, durum, silinenYol: sonuc.yol,
+    db.insertRow("documents", {
+      date: now(), fileName: name, targetPath: folder, docType: "", related: "", method: "Manual", confidence: "—", size: "",
+      user: db.settings().user, status, deletedPath: result.path,
     });
   }
-  res.json(sonuc);
+  res.json(result);
 }));
 
-app.post("/api/belge/geri", sar((req, res) => {
-  const { klasor: yol, ad } = req.body || {};
-  const sonuc = klasor.dosyaGeriYukle(kok(), yol, ad);
-  const kayit = db.tablo("belge").find((b) => b.silinenYol === `${yol}/${ad}`);
-  if (kayit) {
-    db.satirGuncelle("belge", kayit._id, {
-      durum: `Geri yüklendi ${simdi()} · ${db.ayarlar().kullanici}`, dosyaAdi: sonuc.ad, hedefYol: sonuc.klasor, silinenYol: "",
+app.post("/api/document/restore", wrap((req, res) => {
+  const { folder, name } = req.body || {};
+  const result = folders.restoreFile(root(), folder, name);
+  const entry = db.table("documents").find((d) => d.deletedPath === `${folder}/${name}`);
+  if (entry) {
+    db.updateRow("documents", entry._id, {
+      status: `Restored ${now()} · ${db.settings().user}`, fileName: result.name, targetPath: result.folder, deletedPath: "",
     });
   }
-  res.json(sonuc);
+  res.json(result);
 }));
 
-app.post("/api/belge/kalici-sil", sar((req, res) => {
-  const { klasor: yol, ad } = req.body || {};
-  klasor.kaliciSil(kok(), yol, ad);
-  const kayit = db.tablo("belge").find((b) => b.silinenYol === `${yol}/${ad}`);
-  if (kayit) db.satirGuncelle("belge", kayit._id, { durum: `Kalıcı silindi ${simdi()} · ${db.ayarlar().kullanici}`, silinenYol: "" });
-  res.json({ silindi: true });
+app.post("/api/document/purge", wrap((req, res) => {
+  const { folder, name } = req.body || {};
+  folders.purgeFile(root(), folder, name);
+  const entry = db.table("documents").find((d) => d.deletedPath === `${folder}/${name}`);
+  if (entry) db.updateRow("documents", entry._id, { status: `Deleted permanently ${now()} · ${db.settings().user}`, deletedPath: "" });
+  res.json({ deleted: true });
 }));
 
 /* ------------------------------------------------------------------ */
-/* Tablolar                                                            */
+/* Tables                                                              */
 /* ------------------------------------------------------------------ */
 
-function tanimAl(ad) {
-  const t = TABLOLAR[ad];
-  if (!t) throw new Error(`Bilinmeyen tablo: ${ad}`);
+function getDef(name) {
+  const t = TABLES[name];
+  if (!t) throw new Error(`Unknown table: ${name}`);
   return t;
 }
 
-/** Satır kaydedilirken çalışan yan etkiler: kod üretimi, klasör açma, alan doldurma. */
-function satirHazirla(tabloAdi, gelen, mevcut) {
-  const tanim = tanimAl(tabloAdi);
-  const satir = { ...(mevcut || {}) };
+/** Side effects when a row is saved: code generation, folders, default values. */
+function prepareRow(tableName, incoming, existing) {
+  const def = getDef(tableName);
+  const row = { ...(existing || {}) };
 
-  for (const k of tanim.kolon) {
-    if (k.hesap || (k.tur === "salt" && k.k !== "kod")) continue;
-    if (k.k in gelen) satir[k.k] = gelen[k.k];
-    else if (satir[k.k] === undefined) satir[k.k] = k.varsayilan ?? "";
+  for (const c of def.columns) {
+    if (c.computed || (c.type === "readonly" && c.key !== "code")) continue;
+    if (c.key in incoming) row[c.key] = incoming[c.key];
+    else if (row[c.key] === undefined) row[c.key] = c.default ?? "";
   }
-  // Hesaplanan sütunlar diske yazılmaz.
-  for (const k of tanim.kolon) if (k.hesap) delete satir[k.k];
+  // Computed columns are never stored.
+  for (const c of def.columns) if (c.computed) delete row[c.key];
 
-  for (const k of tanim.kolon) {
-    if (k.zorunlu && !String(satir[k.k] || "").trim()) {
-      throw new Error(`"${k.b}" alanı boş bırakılamaz.`);
+  for (const c of def.columns) {
+    if (c.required && !String(row[c.key] || "").trim()) {
+      throw new Error(`"${c.label}" cannot be empty.`);
     }
   }
 
-  if (KODLU.includes(tabloAdi) && !satir.kod) {
-    satir.kod = sonrakiKod(tabloAdi, db.tablo(tabloAdi));
+  if (CODED.includes(tableName) && !row.code) {
+    row.code = nextCode(tableName, db.table(tableName));
   }
-  if (tabloAdi === "zimmet") {
-    if (satir.sahipTuru === "Ekip") {
-      if (!db.satirBul("ekip", (x) => x.kod === satir.ekipKod)) {
-        throw new Error(satir.ekipKod ? `"${satir.ekipKod}" numaralı ekip bulunamadı.` : "Ekip zimmeti için bir ekip seçin.");
+  if (tableName === "equipment") {
+    if (row.ownerType === "Crew") {
+      if (!db.findRow("crews", (x) => x.code === row.crewCode)) {
+        throw new Error(row.crewCode ? `No crew with number "${row.crewCode}".` : "Choose a crew for crew equipment.");
       }
-      satir.personelKod = "";
+      row.employeeCode = "";
     } else {
-      satir.sahipTuru = "Kişi";
-      if (!db.satirBul("personel", (x) => x.kod === satir.personelKod)) {
-        throw new Error(satir.personelKod ? `"${satir.personelKod}" kodlu personel bulunamadı.` : "Kişisel zimmet için bir personel seçin.");
+      row.ownerType = "Person";
+      if (!db.findRow("employees", (x) => x.code === row.employeeCode)) {
+        throw new Error(row.employeeCode ? `No employee with code "${row.employeeCode}".` : "Choose an employee for personal equipment.");
       }
-      satir.ekipKod = "";
+      row.crewCode = "";
     }
   }
-  if (tabloAdi === "avans" && !db.satirBul("personel", (x) => x.kod === satir.personelKod)) {
-    throw new Error(`"${satir.personelKod}" kodlu personel bulunamadı.`);
+  if (tableName === "advances" && !db.findRow("employees", (x) => x.code === row.employeeCode)) {
+    throw new Error(`No employee with code "${row.employeeCode}".`);
   }
-  if (tabloAdi === "kontrat") kontrat.dogrula(satir);
-  if (tabloAdi === "personel") maasGecmisiIsle(satir, mevcut);
-  if (tabloAdi === "kasa") kasaSatiriHazirla(satir, mevcut);
-  return satir;
+  if (tableName === "contracts") contracts.validate(row);
+  if (tableName === "employees") recordPayHistory(row, existing);
+  if (tableName === "cash") prepareCashRow(row, existing);
+  return row;
 }
 
 /**
- * Maaş bölümü değiştiyse tarihli olarak geçmişe yazılır. Puantaj dönemleri açılırken
- * maaşı o anki hâlinden kopyaladığı için değişiklik sadece yeni dönemlere yansır.
+ * When the pay section changes it is written to a dated history. Timesheet periods copy the pay as it is
+ * when they open, so a change only applies to new periods.
  */
-function maasGecmisiIsle(satir, mevcut) {
-  const alanlar = ["odemeTuru", "ucret", "paraBirimi", "mesaiUcreti"];
-  const degisti = alanlar.some((k) => String(mevcut?.[k] ?? "") !== String(satir[k] ?? ""));
-  if (!degisti || !(String(satir.ucret || "").trim() || mevcut?.ucret)) return;
-  satir.maasGecmisi = [
-    ...(mevcut?.maasGecmisi || []),
+function recordPayHistory(row, existing) {
+  const fields = ["payType", "pay", "currency", "overtimeRate"];
+  const changed = fields.some((k) => String(existing?.[k] ?? "") !== String(row[k] ?? ""));
+  if (!changed || !(String(row.pay || "").trim() || existing?.pay)) return;
+  row.payHistory = [
+    ...(existing?.payHistory || []),
     {
-      tarih: new Date().toISOString().slice(0, 10),
-      odemeTuru: satir.odemeTuru || "", ucret: satir.ucret || "", paraBirimi: satir.paraBirimi || "",
-      mesaiUcreti: satir.mesaiUcreti || "",
-      kullanici: db.ayarlar().kullanici,
+      date: new Date().toISOString().slice(0, 10),
+      payType: row.payType || "", pay: row.pay || "", currency: row.currency || "",
+      overtimeRate: row.overtimeRate || "",
+      user: db.settings().user,
     },
   ];
 }
 
-/** Kasa satırı: elle girilen satır "Elle" kaynaklıdır; otomatik satır elle değişirse bir daha ezilmez. */
-function kasaSatiriHazirla(satir, mevcut) {
-  if (!["Gelir", "Gider"].includes(satir.tur)) throw new Error('Tür "Gelir" ya da "Gider" olmalı.');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(satir.tarih || ""))) throw new Error("Tarih geçersiz.");
-  if (!(iliski.sayi(satir.tutar) > 0)) throw new Error("Tutar sıfırdan büyük bir sayı olmalı.");
-  if (!mevcut) satir.kaynak = "Elle";
-  else if (mevcut.anahtar && !mevcut.elleDuzeltildi && kasa.elleDegistiMi(mevcut, satir)) satir.elleDuzeltildi = true;
+/** Cash row: a row entered by hand has source "Manual"; an automatic row edited by hand is never overwritten again. */
+function prepareCashRow(row, existing) {
+  if (!["Income", "Expense"].includes(row.type)) throw new Error('Type must be "Income" or "Expense".');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(row.date || ""))) throw new Error("Invalid date.");
+  if (!(relations.num(row.amount) > 0)) throw new Error("The amount must be a number greater than zero.");
+  if (!existing) row.source = "Manual";
+  else if (existing.key && !existing.editedByHand && cash.changedByHand(existing, row)) row.editedByHand = true;
 }
 
-/** Kayıt değişince kullanıcıya gösterilecek uyarı (ör. ev kapasitesi aşıldı). */
-function kayitUyarisi(tabloAdi, satir, eski) {
-  if (tabloAdi === "personel" && satir.ev && satir.ev !== eski?.ev) {
-    const ev = db.satirBul("ev", (x) => x.kod === satir.ev);
-    const h = ev && iliski.evHesap(ev);
-    if (h?.asim) return `${ev.kod} ${ev.ad}: ${h.kisiSayisi} kişi kalıyor, yatak sayısı ${h.yatak}. Kapasite aşıldı.`;
+/** A warning shown to the user when a record changes (e.g. a house is over capacity). */
+function recordWarning(tableName, row, before) {
+  if (tableName === "employees" && row.house && row.house !== before?.house) {
+    const h = db.findRow("houses", (x) => x.code === row.house);
+    const c = h && relations.houseCalc(h);
+    if (c?.overCapacity) return `${h.code} ${h.name}: ${c.headcount} people live there, ${c.beds} beds. Over capacity.`;
   }
-  if (tabloAdi === "personel" && eski && kontrat.durumOtomatikMi(satir.kod) && satir.durum !== eski.durum) {
-    return "Bu kişinin durumu çalışma dönemlerinden hesaplanıyor; elle değiştirilemez. Kişi sayfasındaki Çalışma Dönemleri kartından düzenleyin.";
+  if (tableName === "employees" && before && contracts.isStatusAutomatic(row.code) && row.status !== before.status) {
+    return "This person's status is computed from employment periods and cannot be changed by hand. Edit it in the Employment Periods card on the employee page.";
   }
   return null;
 }
 
-/** Çalışma dönemi ya da personel değişince durumlar ve açık puantajlar tazelenir. */
-const kontratEsitle = (tabloAdi) => { if (tabloAdi === "kontrat" || tabloAdi === "personel") kontrat.esitle(); };
+/** When an employment period or an employee changes, statuses and open timesheets are refreshed. */
+const syncContracts = (tableName) => { if (tableName === "contracts" || tableName === "employees") contracts.sync(); };
 
-app.get("/api/tablo/:ad", sar((req, res) => {
-  const tanim = tanimAl(req.params.ad);
-  res.json({ tanim, satirlar: db.tablo(req.params.ad).map((s) => iliski.zenginlestir(req.params.ad, s)) });
+app.get("/api/table/:name", wrap((req, res) => {
+  const def = getDef(req.params.name);
+  res.json({ def, rows: db.table(req.params.name).map((r) => relations.enrich(req.params.name, r)) });
 }));
 
-app.get("/api/detay/:ad/:id", sar((req, res) => {
-  const tanim = tanimAl(req.params.ad);
-  if (!tanim.detay) throw new Error(`${tanim.ad} için ayrıntı sayfası yok.`);
-  const d = iliski.detay(req.params.ad, req.params.id);
-  const klasorYolu = tanim.klasorTuru ? klasor.dinamikYol(tanim.klasorTuru, d.satir) : null;
-  res.json({ tanim, klasorYolu, ...d });
+app.get("/api/detail/:name/:id", wrap((req, res) => {
+  const def = getDef(req.params.name);
+  if (!def.detail) throw new Error(`${def.name} has no detail page.`);
+  const d = relations.detail(req.params.name, req.params.id);
+  const folderPath = def.folderType ? folders.dynamicPath(def.folderType, d.row) : null;
+  res.json({ def, folderPath, ...d });
 }));
 
-/* Ekle / güncelle / sil: tablo ekranı ve sesli komut aynı yoldan geçer. */
+/* Insert / update / delete: the table screen and voice commands take the same path. */
 
-function tabloEkle(tabloAdi, gelen) {
-  const tanim = tanimAl(tabloAdi);
-  if (tanim.saltOkunur) throw new Error(`${tanim.ad} düzenlenemez.`);
+function insertRecord(tableName, incoming) {
+  const def = getDef(tableName);
+  if (def.readOnly) throw new Error(`${def.name} cannot be edited.`);
 
-  const satir = db.satirEkle(tabloAdi, satirHazirla(tabloAdi, gelen || {}, null));
-  if (tabloAdi === "avans") kasa.esitle();
-  kontratEsitle(tabloAdi);
-  let klasorRaporu = null;
-  if (tanim.klasorTuru) klasorRaporu = klasor.dinamikKlasorKur(kok(), tanim.klasorTuru, satir);
+  const row = db.insertRow(tableName, prepareRow(tableName, incoming || {}, null));
+  if (tableName === "advances") cash.sync();
+  syncContracts(tableName);
+  let folderReport = null;
+  if (def.folderType) folderReport = folders.buildDynamicFolder(root(), def.folderType, row);
   return {
-    satir: iliski.zenginlestir(tabloAdi, satir),
-    klasorRaporu,
-    klasorYolu: tanim.klasorTuru ? klasor.dinamikYol(tanim.klasorTuru, satir) : null,
-    uyari: kayitUyarisi(tabloAdi, satir, null),
+    row: relations.enrich(tableName, row),
+    folderReport,
+    folderPath: def.folderType ? folders.dynamicPath(def.folderType, row) : null,
+    warning: recordWarning(tableName, row, null),
   };
 }
 
-function tabloGuncelle(tabloAdi, id, gelen) {
-  const tanim = tanimAl(tabloAdi);
-  if (tanim.saltOkunur) throw new Error(`${tanim.ad} düzenlenemez.`);
+function updateRecord(tableName, id, incoming) {
+  const def = getDef(tableName);
+  if (def.readOnly) throw new Error(`${def.name} cannot be edited.`);
 
-  const eski = db.satirBul(tabloAdi, (x) => x._id === id);
-  if (!eski) throw new Error("Kayıt bulunamadı.");
+  const before = db.findRow(tableName, (x) => x._id === id);
+  if (!before) throw new Error("Record not found.");
 
-  const oncekiKopya = { ...eski };
-  const hazir = satirHazirla(tabloAdi, gelen || {}, eski);
-  const durumIstek = hazir.durum;
-  const satir = db.satirGuncelle(tabloAdi, id, hazir);
-  if (tabloAdi === "avans") kasa.esitle();
-  kontratEsitle(tabloAdi);
+  const copy = { ...before };
+  const ready = prepareRow(tableName, incoming || {}, before);
+  const requestedStatus = ready.status;
+  const row = db.updateRow(tableName, id, ready);
+  if (tableName === "advances") cash.sync();
+  syncContracts(tableName);
 
-  let adDegisikligi = null;
-  if (tanim.klasorTuru) {
-    adDegisikligi = klasor.klasorYenidenAdlandir(kok(), tanim.klasorTuru, oncekiKopya, satir);
-    klasor.dinamikKlasorKur(kok(), tanim.klasorTuru, satir);
+  let renamed = null;
+  if (def.folderType) {
+    renamed = folders.renameFolder(root(), def.folderType, copy, row);
+    folders.buildDynamicFolder(root(), def.folderType, row);
   }
-  return { satir: iliski.zenginlestir(tabloAdi, satir), adDegisikligi, uyari: kayitUyarisi(tabloAdi, { ...satir, durum: durumIstek }, oncekiKopya) };
+  return { row: relations.enrich(tableName, row), renamed, warning: recordWarning(tableName, { ...row, status: requestedStatus }, copy) };
 }
 
-app.post("/api/tablo/:ad", sar((req, res) => res.json(tabloEkle(req.params.ad, req.body))));
+app.post("/api/table/:name", wrap((req, res) => res.json(insertRecord(req.params.name, req.body))));
 
-app.put("/api/tablo/:ad/:id", sar((req, res) => res.json(tabloGuncelle(req.params.ad, req.params.id, req.body))));
+app.put("/api/table/:name/:id", wrap((req, res) => res.json(updateRecord(req.params.name, req.params.id, req.body))));
 
 /**
- * Silinen kayda bağlı alanları boşaltır. Açık ekip zimmeti varken ekip silinemez.
- * Döner: kullanıcıya gösterilecek not (varsa).
+ * Clears the fields that point to the deleted record. A crew cannot be deleted while it holds equipment.
+ * Returns: a note for the user (if any).
  */
-function silmeOncesi(tabloAdi, satir) {
-  const bosalt = (tablo, alan) => {
-    for (const r of db.tablo(tablo)) if (r[alan] === satir.kod) db.satirGuncelle(tablo, r._id, { [alan]: "" });
+function beforeDelete(tableName, row) {
+  const clear = (table, field) => {
+    for (const r of db.table(table)) if (r[field] === row.code) db.updateRow(table, r._id, { [field]: "" });
   };
-  if (tabloAdi === "ekip") {
-    const acik = iliski.ekipZimmetleri(satir.kod);
-    if (acik.length) {
-      throw new Error(`${satir.kod} ${satir.ad} üzerinde ${acik.length} açık zimmet var. ` +
-        "Önce zimmetleri iade alın ya da başka bir ekibe/kişiye aktarın.");
+  if (tableName === "crews") {
+    const open = relations.crewEquipment(row.code);
+    if (open.length) {
+      throw new Error(`${row.code} ${row.name} holds ${open.length} items of equipment. ` +
+        "Take them back or transfer them to another crew/person first.");
     }
-    bosalt("personel", "ekip");
+    clear("employees", "crew");
   }
-  if (tabloAdi === "ev") bosalt("personel", "ev");
-  if (tabloAdi === "personel") {
-    db.tum().kontrat = db.tablo("kontrat").filter((r) => r.personelKod !== satir.kod);
-    notlar.kisininNotlariniSil(satir.kod);
+  if (tableName === "houses") clear("employees", "house");
+  if (tableName === "employees") {
+    db.all().contracts = db.table("contracts").filter((r) => r.employeeCode !== row.code);
+    notes.removeForEmployee(row.code);
   }
-  if (tabloAdi === "proje") { bosalt("ekip", "proje"); bosalt("ev", "proje"); }
-  if (tabloAdi === "kasa") return kasa.silinirken(satir);
+  if (tableName === "projects") { clear("crews", "project"); clear("houses", "project"); }
+  if (tableName === "cash") return cash.onDelete(row);
   return null;
 }
 
-function tabloSil(tabloAdi, id) {
-  const tanim = tanimAl(tabloAdi);
-  if (tanim.saltOkunur) throw new Error(`${tanim.ad} düzenlenemez.`);
-  const hedef = db.satirBul(tabloAdi, (x) => x._id === id);
-  const not = hedef ? silmeOncesi(tabloAdi, hedef) : null;
-  const silindi = db.satirSil(tabloAdi, id);
-  if (tabloAdi === "avans") kasa.esitle();
-  kontratEsitle(tabloAdi);
-  // Klasör kasten silinmez — belgeler durur. Kullanıcı isterse elle siler.
-  return { silindi, uyari: not || (tanim.klasorTuru ? "Kayıt silindi. Diskteki klasör ve belgeler olduğu gibi duruyor." : null) };
+function deleteRecord(tableName, id) {
+  const def = getDef(tableName);
+  if (def.readOnly) throw new Error(`${def.name} cannot be edited.`);
+  const target = db.findRow(tableName, (x) => x._id === id);
+  const note = target ? beforeDelete(tableName, target) : null;
+  const deleted = db.deleteRow(tableName, id);
+  if (tableName === "advances") cash.sync();
+  syncContracts(tableName);
+  // The folder is deliberately kept — documents stay. The user can delete it by hand.
+  return { deleted, warning: note || (def.folderType ? "Record deleted. The folder and documents on disk are untouched." : null) };
 }
 
-app.delete("/api/tablo/:ad/:id", sar((req, res) => res.json(tabloSil(req.params.ad, req.params.id))));
+app.delete("/api/table/:name/:id", wrap((req, res) => res.json(deleteRecord(req.params.name, req.params.id))));
 
-asistan.baglan({ ekle: tabloEkle, guncelle: tabloGuncelle, sil: tabloSil });
-asistan.kayitBaslat(VERI_DIZINI, SURUM);
+assistant.connect({ insert: insertRecord, update: updateRecord, remove: deleteRecord });
+assistant.startLog(DATA_DIR, VERSION);
 
-/* Kişi notları (personel sayfasındaki Notlar paneli) */
+/* Per-person notes (the Notes panel on the employee page) */
 
-app.get("/api/notlar/:kod", sar((req, res) => res.json(notlar.liste(req.params.kod))));
-app.post("/api/notlar", sar((req, res) => res.json(notlar.ekle(req.body?.personelKod, req.body || {}))));
-app.put("/api/notlar/:id", sar((req, res) => res.json(notlar.guncelle(req.params.id, req.body || {}))));
-app.delete("/api/notlar/:id", sar((req, res) => { notlar.sil(req.params.id); res.json({ silindi: true }); }));
+app.get("/api/notes/:code", wrap((req, res) => res.json(notes.list(req.params.code))));
+app.post("/api/notes", wrap((req, res) => res.json(notes.add(req.body?.employeeCode, req.body || {}))));
+app.put("/api/notes/:id", wrap((req, res) => res.json(notes.update(req.params.id, req.body || {}))));
+app.delete("/api/notes/:id", wrap((req, res) => { notes.remove(req.params.id); res.json({ deleted: true }); }));
 
 /* ------------------------------------------------------------------ */
 /* Excel                                                               */
 /* ------------------------------------------------------------------ */
 
-app.get("/api/tablo/:ad/excel", sar(async (req, res) => {
-  const tanim = tanimAl(req.params.ad);
-  const tampon = await excel.tabloyuYaz(req.params.ad, db.tablo(req.params.ad).map((s) => iliski.zenginlestir(req.params.ad, s)));
-  const dosyaAdi = `KADRO ${tanim.ad} ${new Date().toISOString().slice(0, 10)}.xlsx`;
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(dosyaAdi)}`);
-  res.end(Buffer.from(tampon));
-}));
-
-app.post("/api/tablo/:ad/excel", yukleyici.single("dosya"), sar(async (req, res) => {
-  const tabloAdi = req.params.ad;
-  const tanim = tanimAl(tabloAdi);
-  if (tanim.saltOkunur) throw new Error(`${tanim.ad} içe aktarılamaz.`);
-  if (!req.file) throw new Error("Dosya gelmedi.");
-
-  const { satirlar, taninanSutun } = await excel.tabloyuOku(tabloAdi, fs.readFileSync(req.file.path));
-  fs.unlinkSync(req.file.path);
-
-  const anahtar = { personel: "kod", proje: "kod", musteri: "kod", ekip: "kod", ev: "kod", arac: "plaka", zimmet: null, avans: null, kasa: null, kontrat: null }[tabloAdi];
-  const rapor = { eklenen: 0, guncellenen: 0, atlanan: [], klasor: 0 };
-
-  for (const [i, ham] of satirlar.entries()) {
-    try {
-      const mevcut = anahtar && ham[anahtar]
-        ? db.satirBul(tabloAdi, (x) => String(x[anahtar]).trim() === String(ham[anahtar]).trim())
-        : null;
-      if (mevcut) {
-        const satir = db.satirGuncelle(tabloAdi, mevcut._id, satirHazirla(tabloAdi, ham, mevcut));
-        if (tanim.klasorTuru) { klasor.dinamikKlasorKur(kok(), tanim.klasorTuru, satir); rapor.klasor += 1; }
-        rapor.guncellenen += 1;
-      } else {
-        const satir = db.satirEkle(tabloAdi, satirHazirla(tabloAdi, ham, null));
-        if (tanim.klasorTuru) { klasor.dinamikKlasorKur(kok(), tanim.klasorTuru, satir); rapor.klasor += 1; }
-        rapor.eklenen += 1;
-      }
-    } catch (e) {
-      rapor.atlanan.push({ satir: i + 1, sebep: e.message });
-    }
-  }
-  if (tabloAdi === "avans") kasa.esitle();
-  kontratEsitle(tabloAdi);
-  res.json({ ...rapor, taninanSutun, okunan: satirlar.length });
-}));
-
-/* ------------------------------------------------------------------ */
-/* Belge yükleme ve otomatik yönlendirme                               */
-/* ------------------------------------------------------------------ */
-
-app.post("/api/yukle", yukleyici.array("dosyalar", 30), sar(async (req, res) => {
-  if (!req.files?.length) throw new Error("Dosya gelmedi.");
-  const sonuclar = [];
-
-  for (const f of req.files) {
-    const orijinal = Buffer.from(f.originalname, "latin1").toString("utf8");
-    const ad = /[À-ÿ]/.test(f.originalname) && !/[ğüşıöçİĞÜŞÖÇ]/.test(f.originalname)
-      ? orijinal : f.originalname;
-    try {
-      const sonuc = await siniflandir(f.path, ad);
-      const fis = `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-      bekleyen.set(fis, { yol: f.path, ad, boyut: f.size, zaman: Date.now() });
-      sonuclar.push({ fis, boyut: f.size, ...sonuc });
-    } catch (e) {
-      try { fs.unlinkSync(f.path); } catch {}
-      sonuclar.push({ dosyaAdi: ad, hata: e.message });
-    }
-  }
-  res.json({ sonuclar });
-}));
-
-app.post("/api/yerlestir", sar((req, res) => {
-  const { fis, hedefYol, dosyaAdi, belgeTuru, ilgili, yontem, guven } = req.body || {};
-  const kayit = bekleyen.get(fis);
-  if (!kayit) throw new Error("Dosya süresi doldu veya zaten yerleştirildi. Lütfen yeniden yükleyin.");
-  if (!hedefYol) throw new Error("Hedef klasör seçilmedi.");
-
-  const yerlesen = klasor.dosyaYerlestir(kok(), kayit.yol, hedefYol, dosyaAdi || kayit.ad);
-  bekleyen.delete(fis);
-
-  const defterKaydi = db.satirEkle("belge", {
-    tarih: new Date().toLocaleString("tr-TR"),
-    dosyaAdi: yerlesen.ad,
-    hedefYol,
-    belgeTuru: belgeTuru || "",
-    ilgili: ilgili || "",
-    yontem: yontem === "claude" ? "Yapay zekâ" : yontem === "kural" ? "Kural" : "Elle",
-    guven: guven ? `%${Math.round(guven * 100)}` : "—",
-    boyut: `${(yerlesen.boyut / 1024).toFixed(0)} KB`,
-    kullanici: db.ayarlar().kullanici,
-  });
-  res.json({ yerlesen, defterKaydi });
-}));
-
-app.post("/api/iptal", sar((req, res) => {
-  const kayit = bekleyen.get(req.body.fis);
-  if (kayit) { try { fs.unlinkSync(kayit.yol); } catch {} bekleyen.delete(req.body.fis); }
-  res.json({ iptal: true });
-}));
-
-/** Hedef elle değiştirilince dosya adı önerisini tazeler. */
-app.post("/api/ad-oner", sar((req, res) => {
-  const { dosyaAdi, hedefYol } = req.body || {};
-  const kural = kuralIle(dosyaAdi || "");
-  res.json({ ad: onerilenAd(dosyaAdi || "", { ...kural, hedefYol }) });
-}));
-
-/* ------------------------------------------------------------------ */
-/* Puantaj                                                             */
-/* ------------------------------------------------------------------ */
-
-/** Ekrana giden dönem paketi: kayıt + hesap + gün başlıkları + komşu dönemler. */
-function puantajPaketi(donem) {
-  const d = puantaj.donemCoz(donem).donem;
-  const p = puantaj.bul(d);
-  const ortak = {
-    donem: d, ad: puantaj.donemAdi(d),
-    onceki: puantaj.komsuDonem(d, -1), sonraki: puantaj.komsuDonem(d, 1),
-    buDonem: puantaj.buDonem(),
-    gunler: puantaj.gunBilgisi(d),
-  };
-  if (!p) return { ...ortak, yok: true, onizleme: puantaj.onizleme(d) };
-  return { ...ortak, kayit: p, hesap: puantaj.hesapla(p) };
-}
-
-const puantajDosyaYolu = (donem) => {
-  const d = puantaj.donemCoz(donem);
-  return `02 - Muhasebe/Maaşlar/Puantaj/${d.yil}-${String(d.ay).padStart(2, "0")} ${d.yari}. Yarı.xlsx`;
+const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const sendFile = (res, buffer, name, type = XLSX) => {
+  res.setHeader("Content-Type", type);
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.end(Buffer.from(buffer));
 };
 
-app.get("/api/puantaj", sar((_req, res) => {
-  res.json(puantaj.tumDonemler().map((p) => ({ donem: p.donem, ad: puantaj.donemAdi(p.donem), durum: p.durum, kisi: p.satirlar.length })));
+app.get("/api/table/:name/excel", wrap(async (req, res) => {
+  const def = getDef(req.params.name);
+  const buffer = await excel.writeTable(req.params.name, db.table(req.params.name).map((r) => relations.enrich(req.params.name, r)));
+  sendFile(res, buffer, `Kadro ${def.name} ${new Date().toISOString().slice(0, 10)}.xlsx`);
 }));
 
-app.get("/api/puantaj/:donem", sar((req, res) => res.json(puantajPaketi(req.params.donem))));
+app.post("/api/table/:name/excel", upload.single("file"), wrap(async (req, res) => {
+  const tableName = req.params.name;
+  const def = getDef(tableName);
+  if (def.readOnly) throw new Error(`${def.name} cannot be imported.`);
+  if (!req.file) throw new Error("No file received.");
 
-app.post("/api/puantaj/:donem", sar((req, res) => {
-  puantaj.olustur(req.params.donem);
-  res.json(puantajPaketi(req.params.donem));
-}));
+  const { rows, recognisedColumns } = await excel.readTable(tableName, fs.readFileSync(req.file.path));
+  fs.unlinkSync(req.file.path);
 
-app.put("/api/puantaj/:donem/hucre", sar((req, res) => {
-  const liste = Array.isArray(req.body?.degisiklikler) ? req.body.degisiklikler : [req.body];
-  puantaj.hucreYaz(req.params.donem, liste);
-  res.json(puantajPaketi(req.params.donem));
-}));
+  const key = { employees: "code", projects: "code", clients: "code", crews: "code", houses: "code", vehicles: "plate" }[tableName] || null;
+  const report = { added: 0, updated: 0, skipped: [], folders: 0 };
 
-app.put("/api/puantaj/:donem/ekip-gun", sar((req, res) => {
-  const { personelKod, gunler, ekip } = req.body || {};
-  puantaj.ekipGunYaz(req.params.donem, personelKod, gunler || [], ekip || "");
-  res.json(puantajPaketi(req.params.donem));
-}));
-
-app.put("/api/puantaj/:donem/ayar", sar((req, res) => {
-  puantaj.ayarYaz(req.params.donem, req.body || {});
-  res.json(puantajPaketi(req.params.donem));
-}));
-
-app.post("/api/puantaj/:donem/satir", sar((req, res) => {
-  puantaj.satirEkle(req.params.donem, req.body?.personelKod);
-  res.json(puantajPaketi(req.params.donem));
-}));
-
-app.delete("/api/puantaj/:donem/satir/:kod", sar((req, res) => {
-  puantaj.satirCikar(req.params.donem, req.params.kod);
-  res.json(puantajPaketi(req.params.donem));
-}));
-
-app.post("/api/puantaj/:donem/kapat", sar(async (req, res) => {
-  const p = puantaj.al(req.params.donem);
-  if (p.durum === "kapali") throw new Error("Dönem zaten kapalı.");
-  // Önce kilitle, sonra kapalı hâliyle Excel'i yaz (boş günler artık eksik sayılır).
-  puantaj.durumYaz(p.donem, "kapali");
-  const yol = puantajDosyaYolu(p.donem);
-  let dosya = null;
-  try {
-    const tampon = await excel.puantajYaz(p, puantaj.hesapla(p), puantaj.gunBilgisi(p.donem), puantaj.donemAdi(p.donem));
-    const tam = klasor.tamYol(kok(), yol);
-    fs.mkdirSync(path.dirname(tam), { recursive: true });
-    fs.writeFileSync(tam, Buffer.from(tampon));
-    dosya = yol;
-  } catch (e) {
-    console.error(`[puantaj] Excel yazılamadı: ${e.message}`);
+  for (const [i, raw] of rows.entries()) {
+    try {
+      const existing = key && raw[key]
+        ? db.findRow(tableName, (x) => String(x[key]).trim() === String(raw[key]).trim())
+        : null;
+      if (existing) {
+        const row = db.updateRow(tableName, existing._id, prepareRow(tableName, raw, existing));
+        if (def.folderType) { folders.buildDynamicFolder(root(), def.folderType, row); report.folders += 1; }
+        report.updated += 1;
+      } else {
+        const row = db.insertRow(tableName, prepareRow(tableName, raw, null));
+        if (def.folderType) { folders.buildDynamicFolder(root(), def.folderType, row); report.folders += 1; }
+        report.added += 1;
+      }
+    } catch (e) {
+      report.skipped.push({ row: i + 1, reason: e.message });
+    }
   }
-  puantaj.durumYaz(p.donem, "kapali", { dosya });
-  const kasaRaporu = kasa.esitle();
+  if (tableName === "advances") cash.sync();
+  syncContracts(tableName);
+  res.json({ ...report, recognisedColumns, read: rows.length });
+}));
+
+/* ------------------------------------------------------------------ */
+/* Document upload and automatic filing                                */
+/* ------------------------------------------------------------------ */
+
+app.post("/api/upload", upload.array("files", 30), wrap(async (req, res) => {
+  if (!req.files?.length) throw new Error("No file received.");
+  const results = [];
+
+  for (const f of req.files) {
+    const decoded = Buffer.from(f.originalname, "latin1").toString("utf8");
+    const name = /[À-ÿ]/.test(f.originalname) && !/[ğüşıöçİĞÜŞÖÇ]/.test(f.originalname)
+      ? decoded : f.originalname;
+    try {
+      const result = await classify(f.path, name);
+      const ticket = `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+      pending.set(ticket, { path: f.path, name, size: f.size, time: Date.now() });
+      results.push({ ticket, size: f.size, ...result });
+    } catch (e) {
+      try { fs.unlinkSync(f.path); } catch {}
+      results.push({ fileName: name, error: e.message });
+    }
+  }
+  res.json({ results });
+}));
+
+app.post("/api/place", wrap((req, res) => {
+  const { ticket, targetPath, fileName, docType, related, method, confidence } = req.body || {};
+  const p = pending.get(ticket);
+  if (!p) throw new Error("The file has expired or was already filed. Please upload it again.");
+  if (!targetPath) throw new Error("No target folder chosen.");
+
+  const placed = folders.placeFile(root(), p.path, targetPath, fileName || p.name);
+  pending.delete(ticket);
+
+  const logEntry = db.insertRow("documents", {
+    date: new Date().toLocaleString("en-GB"),
+    fileName: placed.name,
+    targetPath,
+    docType: docType || "",
+    related: related || "",
+    method: method === "claude" ? "AI" : method === "rules" ? "Rules" : "Manual",
+    confidence: confidence ? `${Math.round(confidence * 100)}%` : "—",
+    size: `${(placed.size / 1024).toFixed(0)} KB`,
+    user: db.settings().user,
+  });
+  res.json({ placed, logEntry });
+}));
+
+app.post("/api/cancel", wrap((req, res) => {
+  const p = pending.get(req.body.ticket);
+  if (p) { try { fs.unlinkSync(p.path); } catch {} pending.delete(req.body.ticket); }
+  res.json({ cancelled: true });
+}));
+
+/** Refreshes the suggested file name when the target is changed by hand. */
+app.post("/api/suggest-name", wrap((req, res) => {
+  const { fileName, targetPath } = req.body || {};
+  const rules = byRules(fileName || "");
+  res.json({ name: suggestedName(fileName || "", { ...rules, targetPath }) });
+}));
+
+/* ------------------------------------------------------------------ */
+/* Timesheet                                                           */
+/* ------------------------------------------------------------------ */
+
+/** The period package sent to the screen: record + calculation + day headers + neighbouring periods. */
+function timesheetPackage(period) {
+  const pid = timesheet.parsePeriod(period).period;
+  const t = timesheet.find(pid);
+  const common = {
+    period: pid, name: timesheet.periodName(pid),
+    previous: timesheet.adjacentPeriod(pid, -1), next: timesheet.adjacentPeriod(pid, 1),
+    current: timesheet.currentPeriod(),
+    days: timesheet.dayInfo(pid),
+  };
+  if (!t) return { ...common, missing: true, preview: timesheet.preview(pid) };
+  return { ...common, record: t, calc: timesheet.calc(t) };
+}
+
+const timesheetFilePath = (period) => {
+  const p = timesheet.parsePeriod(period);
+  return `02 - Accounting/Payroll/Timesheets/${p.year}-${String(p.month).padStart(2, "0")} H${p.half}.xlsx`;
+};
+
+const writeTimesheetFile = async (t) =>
+  excel.writeTimesheet(t, timesheet.calc(t), timesheet.dayInfo(t.period), timesheet.periodName(t.period));
+
+app.get("/api/timesheets", wrap((_req, res) => {
+  res.json(timesheet.allPeriods().map((t) => ({ period: t.period, name: timesheet.periodName(t.period), status: t.status, people: t.rows.length })));
+}));
+
+app.get("/api/timesheet/:period", wrap((req, res) => res.json(timesheetPackage(req.params.period))));
+
+app.post("/api/timesheet/:period", wrap((req, res) => {
+  timesheet.create(req.params.period);
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.put("/api/timesheet/:period/cells", wrap((req, res) => {
+  const list = Array.isArray(req.body?.changes) ? req.body.changes : [req.body];
+  timesheet.writeCells(req.params.period, list);
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.put("/api/timesheet/:period/crew-days", wrap((req, res) => {
+  const { employeeCode, days, crew } = req.body || {};
+  timesheet.writeCrewDays(req.params.period, employeeCode, days || [], crew || "");
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.put("/api/timesheet/:period/settings", wrap((req, res) => {
+  timesheet.writeSettings(req.params.period, req.body || {});
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.post("/api/timesheet/:period/row", wrap((req, res) => {
+  timesheet.addRow(req.params.period, req.body?.employeeCode);
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.delete("/api/timesheet/:period/row/:code", wrap((req, res) => {
+  timesheet.removeRow(req.params.period, req.params.code);
+  res.json(timesheetPackage(req.params.period));
+}));
+
+app.post("/api/timesheet/:period/close", wrap(async (req, res) => {
+  const t = timesheet.get(req.params.period);
+  if (t.status === "closed") throw new Error("The period is already closed.");
+  // Lock first, then write the Excel file in its closed state (empty days now count as short).
+  timesheet.setStatus(t.period, "closed");
+  const file = timesheetFilePath(t.period);
+  let written = null;
+  try {
+    const full = folders.fullPath(root(), file);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, Buffer.from(await writeTimesheetFile(t)));
+    written = file;
+  } catch (e) {
+    console.error(`[timesheet] Excel could not be written: ${e.message}`);
+  }
+  timesheet.setStatus(t.period, "closed", { file: written });
+  const cashReport = cash.sync();
   res.json({
-    ...puantajPaketi(p.donem), dosya, kasa: kasaRaporu,
-    dosyaHatasi: dosya ? null : "Dönem kapandı ama Excel dosyası diske yazılamadı. Belge kökünü kontrol edin.",
+    ...timesheetPackage(t.period), file: written, cash: cashReport,
+    fileError: written ? null : "The period is closed but the Excel file could not be written to disk. Check the document root.",
   });
 }));
 
-app.post("/api/puantaj/:donem/ac", sar((req, res) => {
-  puantaj.durumYaz(puantaj.al(req.params.donem).donem, "acik");
-  // Kapanışta kasaya yazılan yemek / kira / maaş satırları geri alınır (elle düzeltilenler durur).
-  res.json({ ...puantajPaketi(req.params.donem), kasa: kasa.esitle() });
+app.post("/api/timesheet/:period/open", wrap((req, res) => {
+  timesheet.setStatus(timesheet.get(req.params.period).period, "open");
+  // Meal / rent / salary rows written to cash at closing are taken back (rows corrected by hand stay).
+  res.json({ ...timesheetPackage(req.params.period), cash: cash.sync() });
 }));
 
-app.get("/api/puantaj/:donem/excel", sar(async (req, res) => {
-  const p = puantaj.al(req.params.donem);
-  const tampon = await excel.puantajYaz(p, puantaj.hesapla(p), puantaj.gunBilgisi(p.donem), puantaj.donemAdi(p.donem));
-  const d = puantaj.donemCoz(p.donem);
-  const ad = `KADRO Puantaj ${d.yil}-${String(d.ay).padStart(2, "0")} ${d.yari}. Yarı.xlsx`;
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(ad)}`);
-  res.end(Buffer.from(tampon));
+app.get("/api/timesheet/:period/excel", wrap(async (req, res) => {
+  const t = timesheet.get(req.params.period);
+  const p = timesheet.parsePeriod(t.period);
+  sendFile(res, await writeTimesheetFile(t), `Kadro Timesheet ${p.year}-${String(p.month).padStart(2, "0")} H${p.half}.xlsx`);
 }));
 
-app.post("/api/puantaj/:donem/excel", yukleyici.single("dosya"), sar(async (req, res) => {
-  if (!req.file) throw new Error("Dosya gelmedi.");
-  const p = puantaj.al(req.params.donem);
-  let okunan;
+app.post("/api/timesheet/:period/excel", upload.single("file"), wrap(async (req, res) => {
+  if (!req.file) throw new Error("No file received.");
+  const t = timesheet.get(req.params.period);
+  let read;
   try {
-    okunan = await excel.puantajOku(fs.readFileSync(req.file.path), p, puantaj.gunBilgisi(p.donem));
+    read = await excel.readTimesheet(fs.readFileSync(req.file.path), t, timesheet.dayInfo(t.period));
   } finally {
     fs.unlinkSync(req.file.path);
   }
-  // Değişmeyen hücreleri ayıkla; hatalı bir değer varsa hiçbir şey yazılmaz.
-  const degisen = okunan.degisiklikler.filter(({ personelKod, gun, deger }) => {
-    const s = p.satirlar.find((x) => x.personelKod === personelKod);
-    return (s.hucre[gun] || "") !== puantaj.degerNormalize(deger);
+  // Skip cells that did not change; if one value is invalid, nothing is written.
+  const changed = read.changes.filter(({ employeeCode, day, value }) => {
+    const r = t.rows.find((x) => x.employeeCode === employeeCode);
+    return (r.cells[day] || "") !== timesheet.normalizeValue(value);
   });
-  if (degisen.length) puantaj.hucreYaz(p.donem, degisen);
-  res.json({ ...puantajPaketi(p.donem), rapor: { degisen: degisen.length, bilinmeyen: okunan.bilinmeyen } });
+  if (changed.length) timesheet.writeCells(t.period, changed);
+  res.json({ ...timesheetPackage(t.period), report: { changed: changed.length, unknown: read.unknown } });
 }));
 
-app.get("/api/istatistik", sar((req, res) => {
-  res.json(puantaj.istatistik(req.query.bas || "", req.query.bit || ""));
+app.get("/api/statistics", wrap((req, res) => {
+  res.json(timesheet.statistics(req.query.from || "", req.query.to || ""));
 }));
 
-app.get("/api/istatistik/personel/:kod", sar((req, res) => res.json(puantaj.personelDokumu(req.params.kod))));
+app.get("/api/statistics/employee/:code", wrap((req, res) => res.json(timesheet.employeeBreakdown(req.params.code))));
 
-/** Çalışanın gözünden sayfası: kişinin kendi puantajı, hakedişi, kesinti nedenleri ve ödemeleri. */
-app.get("/api/calisan/:kod", sar((req, res) => res.json({ ...calisan.gorunum(req.params.kod), kurAyari: kurlar.kurAyari() })));
+/** Employee's view: the person's own timesheet, earnings, reasons for deductions and payments. */
+app.get("/api/employee-view/:code", wrap((req, res) => res.json({ ...employeeView.view(req.params.code), rates: rates.rateSettings() })));
 
 /* ------------------------------------------------------------------ */
-/* Kasa                                                                */
+/* Cash                                                                */
 /* ------------------------------------------------------------------ */
 
-const kasaDosyaYolu = (ay) => `02 - Muhasebe/Kasa/${ay} Kasa.xlsx`;
+const cashFilePath = (month) => `02 - Accounting/Cash/${month} Cash.xlsx`;
 
-/** Kasa satırları: ekran ve Excel için durum etiketi, proje ve personel adı eklenir. */
-function kasaSatirlari(satirlar) {
-  const proje = new Map(db.tablo("proje").map((x) => [x.kod, x.ad]));
-  const personel = new Map(db.tablo("personel").map((x) => [x.kod, x.ad]));
-  return satirlar.map((r) => ({
-    ...iliski.zenginlestir("kasa", r),
-    projeAd: r.proje ? proje.get(r.proje) || r.proje : "",
-    personelAd: r.personelKod ? personel.get(r.personelKod) || r.personelKod : "",
+/** Cash rows for the screen and Excel: status label, project and employee names added. */
+function cashRows(rows) {
+  const projects = new Map(db.table("projects").map((x) => [x.code, x.name]));
+  const employees = new Map(db.table("employees").map((x) => [x.code, x.name]));
+  return rows.map((r) => ({
+    ...relations.enrich("cash", r),
+    projectName: r.project ? projects.get(r.project) || r.project : "",
+    employeeName: r.employeeCode ? employees.get(r.employeeCode) || r.employeeCode : "",
   }));
 }
 
-const kasaAyi = (ay) => { const v = kasa.ay(ay); return { ...v, satirlar: kasaSatirlari(v.satirlar) }; };
+const cashMonth = (month) => { const v = cash.month(month); return { ...v, rows: cashRows(v.rows) }; };
 
-// Aylık kasa dosyası: en son yazılan içeriğin imzası ve yazılamadıysa sebebi.
-const kasaImza = new Map();
-const kasaDosyaHatasi = new Map();
-let kasaZamanlayici = null;
+// Monthly cash file: the signature of the last written content, and the reason if it could not be written.
+const cashSignature = new Map();
+const cashFileError = new Map();
+let cashTimer = null;
 
-function kasaDosyalariniZamanla() {
-  clearTimeout(kasaZamanlayici);
-  kasaZamanlayici = setTimeout(() => kasaDosyalariniYaz().catch((e) => console.error(`[kasa] ${e.message}`)), 400);
+function scheduleCashFiles() {
+  clearTimeout(cashTimer);
+  cashTimer = setTimeout(() => writeCashFiles().catch((e) => console.error(`[cash] ${e.message}`)), 400);
 }
 
-async function kasaDosyalariniYaz() {
-  if (!fs.existsSync(kok())) return; // yapı henüz diske kurulmadı
-  for (const ay of new Set([...kasaImza.keys(), ...kasa.aylar()])) {
-    const v = kasaAyi(ay);
-    const imza = JSON.stringify([v.satirlar.map((r) => [r._id, r.tarih, r.tur, r.kategori, r.aciklama, r.proje,
-      r.personelKod, r.tutar, r.paraBirimi, r.durumEtiketi]), v.ozet.devir, v.silinen.length]);
-    const tam = klasor.tamYol(kok(), kasaDosyaYolu(ay));
-    if (kasaImza.get(ay) === imza && fs.existsSync(tam)) continue;
+async function writeCashFiles() {
+  if (!fs.existsSync(root())) return; // the structure has not been built on disk yet
+  for (const month of new Set([...cashSignature.keys(), ...cash.months()])) {
+    const v = cashMonth(month);
+    const signature = JSON.stringify([v.rows.map((r) => [r._id, r.date, r.type, r.category, r.description, r.project,
+      r.employeeCode, r.amount, r.currency, r.statusLabel]), v.summary.carry, v.deleted.length]);
+    const full = folders.fullPath(root(), cashFilePath(month));
+    if (cashSignature.get(month) === signature && fs.existsSync(full)) continue;
     try {
-      fs.mkdirSync(path.dirname(tam), { recursive: true });
-      fs.writeFileSync(tam, Buffer.from(await excel.kasaYaz(v)));
-      kasaImza.set(ay, imza);
-      kasaDosyaHatasi.delete(ay);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, Buffer.from(await excel.writeCash(v)));
+      cashSignature.set(month, signature);
+      cashFileError.delete(month);
     } catch (e) {
-      kasaDosyaHatasi.set(ay, ["EBUSY", "EPERM"].includes(e.code)
-        ? "Kasa dosyası şu an Excel'de açık olduğu için güncellenemedi. Dosyayı kapatınca bir sonraki değişiklikte yazılır."
-        : `Kasa dosyası yazılamadı: ${e.message}`);
+      cashFileError.set(month, ["EBUSY", "EPERM"].includes(e.code)
+        ? "The cash file could not be updated because it is open in Excel. It will be written on the next change after you close it."
+        : `The cash file could not be written: ${e.message}`);
     }
   }
 }
 
-// "rapor" bir ay değil; :ay rotalarından önce tanımlanmalı.
-app.get("/api/kasa/rapor", sar((req, res) => res.json(kasa.rapor(req.query))));
+// "report" is not a month; it must be defined before the :month routes.
+app.get("/api/cash/report", wrap((req, res) => res.json(cash.report(req.query))));
 
-app.get("/api/kasa/rapor/excel", sar(async (req, res) => {
-  const r = kasa.rapor(req.query);
-  const turAd = { donem: "15 Günlük", ay: "Aylık", ceyrek: "Çeyreklik", yariyil: "Yarıyıllık", yil: "Yıllık", proje: "Proje Bazlı" }[r.tur];
-  const baslik = `Kasa Raporu · ${turAd}${r.tur === "yil" ? "" : ` · ${r.yil}`} · ${r.projeAd}`;
-  const tampon = await excel.kasaRaporYaz(r, baslik);
-  const ad = `KADRO Kasa Raporu ${turAd} ${r.tur === "yil" ? "" : r.yil}.xlsx`.replace(/\s+\./, ".");
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(ad)}`);
-  res.end(Buffer.from(tampon));
+app.get("/api/cash/report/excel", wrap(async (req, res) => {
+  const r = cash.report(req.query);
+  const typeName = { period: "15-Day", month: "Monthly", quarter: "Quarterly", half: "Half-Yearly", year: "Yearly", project: "By Project" }[r.type];
+  const title = `Cash Report · ${typeName}${r.type === "year" ? "" : ` · ${r.year}`} · ${r.projectName}`;
+  sendFile(res, await excel.writeCashReport(r, title), `Kadro Cash Report ${typeName} ${r.type === "year" ? "" : r.year}.xlsx`.replace(/\s+\./, "."));
 }));
 
-app.get("/api/kasa/:ay", sar((req, res) => {
-  const ay = req.params.ay === "bu" ? kasa.buAy() : req.params.ay;
+app.get("/api/cash/:month", wrap((req, res) => {
+  const month = req.params.month === "current" ? cash.currentMonth() : req.params.month;
   res.json({
-    ...kasaAyi(ay), tanim: TABLOLAR.kasa,
-    dosya: kasaDosyaYolu(ay), dosyaHatasi: kasaDosyaHatasi.get(ay) || null,
+    ...cashMonth(month), def: TABLES.cash,
+    file: cashFilePath(month), fileError: cashFileError.get(month) || null,
   });
 }));
 
-app.get("/api/kasa/:ay/excel", sar(async (req, res) => {
-  const tampon = await excel.kasaYaz(kasaAyi(req.params.ay));
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`KADRO ${req.params.ay} Kasa.xlsx`)}`);
-  res.end(Buffer.from(tampon));
+app.get("/api/cash/:month/excel", wrap(async (req, res) => {
+  sendFile(res, await excel.writeCash(cashMonth(req.params.month)), `Kadro ${req.params.month} Cash.xlsx`);
 }));
 
-app.post("/api/kasa/:ay/geri-getir", sar((req, res) => res.json(kasa.geriGetir(req.params.ay))));
+app.post("/api/cash/:month/restore", wrap((req, res) => res.json(cash.restoreMonth(req.params.month))));
 
-app.post("/api/kasa/satir/:id/sistem", sar((req, res) => {
-  const rapor = kasa.sistemeBirak(req.params.id);
-  const satir = db.satirBul("kasa", (x) => x._id === req.params.id);
-  res.json({ ...rapor, satir: satir ? kasaSatirlari([satir])[0] : null });
+app.post("/api/cash/row/:id/system", wrap((req, res) => {
+  const report = cash.releaseToSystem(req.params.id);
+  const row = db.findRow("cash", (x) => x._id === req.params.id);
+  res.json({ ...report, row: row ? cashRows([row])[0] : null });
 }));
 
 /* ------------------------------------------------------------------ */
-/* Ödemeler                                                            */
+/* Payments                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Vadesi gelmiş (bugün ya da önce) ve ödenmemiş kalem sayısı: menüdeki sayaç. */
-function bekleyenOdeme() {
+/** Unpaid items due today or earlier: the counter in the menu. */
+function paymentsDue() {
   try {
-    const bugun = new Date().toISOString().slice(0, 10);
-    const odenen = new Set(db.tablo("odeme").map((r) => r.anahtar));
-    return odeme.kalemler().filter((k) => k.vade <= bugun && !odenen.has(k.anahtar)).length;
+    const today = new Date().toISOString().slice(0, 10);
+    const paid = new Set(db.table("payments").map((r) => r.key));
+    return payments.items().filter((k) => k.due <= today && !paid.has(k.key)).length;
   } catch { return 0; }
 }
 
-app.get("/api/odeme/:ay", sar((req, res) => {
-  const ay = req.params.ay === "bu" ? kasa.buAy() : req.params.ay;
-  res.json({ ...odeme.ay(ay), ad: kasa.ayAdi(ay), onceki: kasaKomsuAy(ay, -1), sonraki: kasaKomsuAy(ay, 1), buAy: kasa.buAy() });
-}));
-
-app.post("/api/odeme", sar((req, res) => {
-  const adet = odeme.ode(req.body?.liste || []);
-  res.json({ adet, kasa: kasa.esitle() });
-}));
-
-app.post("/api/odeme/geri-al", sar((req, res) => {
-  odeme.geriAl(req.body?.anahtar);
-  res.json({ kasa: kasa.esitle() });
-}));
-
-function kasaKomsuAy(ay, yon) {
-  const [y, a] = ay.split("-").map(Number);
-  const d = new Date(Date.UTC(y, a - 1 + yon, 1));
+function adjacentMonth(month, dir) {
+  const [y, m] = month.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + dir, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/* ------------------------------------------------------------------ */
-/* Öngörü                                                              */
-/* ------------------------------------------------------------------ */
-
-app.get("/api/ongoru", sar((req, res) => res.json(ongoru.hesapla(req.query))));
-
-app.put("/api/ongoru/hucre", sar((req, res) => {
-  ongoru.hucreYaz(req.body || {});
-  res.json(ongoru.hesapla(req.body?.gorunum || {}));
+app.get("/api/payments/:month", wrap((req, res) => {
+  const month = req.params.month === "current" ? cash.currentMonth() : req.params.month;
+  res.json({ ...payments.month(month), name: cash.monthName(month), previous: adjacentMonth(month, -1), next: adjacentMonth(month, 1), current: cash.currentMonth() });
 }));
 
-app.get("/api/ongoru/excel", sar(async (req, res) => {
-  const v = ongoru.hesapla(req.query);
-  const tampon = await excel.ongoruYaz(v);
-  const ad = `KADRO Öngörü ${v.sutunlar[0].donem} - ${v.sutunlar.at(-1).donem}.xlsx`;
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(ad)}`);
-  res.end(Buffer.from(tampon));
+app.post("/api/payments", wrap((req, res) => {
+  const count = payments.pay(req.body?.list || []);
+  res.json({ count, cash: cash.sync() });
+}));
+
+app.post("/api/payments/undo", wrap((req, res) => {
+  payments.undo(req.body?.key);
+  res.json({ cash: cash.sync() });
 }));
 
 /* ------------------------------------------------------------------ */
-/* Sesli komut (bkz. src/asistan.js)                                   */
+/* Forecast                                                            */
 /* ------------------------------------------------------------------ */
 
-app.get("/api/asistan", sar((_req, res) => res.json(asistan.durum())));
+app.get("/api/forecast", wrap((req, res) => res.json(forecast.calc(req.query))));
 
-app.post("/api/asistan/metin", sar(async (req, res) => {
-  res.json(await asistan.komut(req.body?.metin, req.body?.konusmaId));
+app.put("/api/forecast/cell", wrap((req, res) => {
+  forecast.writeCell(req.body || {});
+  res.json(forecast.calc(req.body?.view || {}));
 }));
 
-app.post("/api/asistan/ses", yukleyici.single("ses"), sar(async (req, res) => {
-  if (!req.file) throw new Error("Ses gelmedi.");
-  try { res.json(await asistan.sesKomutu(req.file.path, req.file.mimetype, req.body?.konusmaId)); }
+app.get("/api/forecast/excel", wrap(async (req, res) => {
+  const v = forecast.calc(req.query);
+  sendFile(res, await excel.writeForecast(v), `Kadro Forecast ${v.columns[0].period} - ${v.columns.at(-1).period}.xlsx`);
+}));
+
+/* ------------------------------------------------------------------ */
+/* Voice commands (see src/assistant.js)                               */
+/* ------------------------------------------------------------------ */
+
+app.get("/api/assistant", wrap((_req, res) => res.json(assistant.status())));
+
+app.post("/api/assistant/text", wrap(async (req, res) => {
+  res.json(await assistant.command(req.body?.text, req.body?.conversationId));
+}));
+
+app.post("/api/assistant/voice", upload.single("audio"), wrap(async (req, res) => {
+  if (!req.file) throw new Error("No audio received.");
+  try { res.json(await assistant.voiceCommand(req.file.path, req.file.mimetype, req.body?.conversationId)); }
   finally { fs.unlink(req.file.path, () => {}); }
 }));
 
-app.post("/api/asistan/onayla", sar((req, res) => res.json(asistan.onayla(req.body?.id))));
-app.post("/api/asistan/vazgec", sar((req, res) => res.json(asistan.vazgec(req.body?.id))));
-app.post("/api/asistan/geri-al", sar((req, res) => res.json(asistan.geriAl(req.body?.id))));
-// Komut kaydı: kuyrukta kaç kayıt var; gönder = 15 dakikayı beklemeden şimdi gönder.
-app.get("/api/asistan/kayit", sar((_req, res) => res.json(asistan.kayitDurumu())));
-app.post("/api/asistan/kayit/gonder", sar(async (_req, res) => res.json({ ...(await asistan.kayitGonder()), ...asistan.kayitDurumu() })));
+app.post("/api/assistant/approve", wrap((req, res) => res.json(assistant.approve(req.body?.id))));
+app.post("/api/assistant/cancel", wrap((req, res) => res.json(assistant.cancel(req.body?.id))));
+app.post("/api/assistant/undo", wrap((req, res) => res.json(assistant.undo(req.body?.id))));
+// Command log: how many records are queued; send = send now instead of waiting 15 minutes.
+app.get("/api/assistant/log", wrap((_req, res) => res.json(assistant.logStatus())));
+app.post("/api/assistant/log/send", wrap(async (_req, res) => res.json({ ...(await assistant.logSend()), ...assistant.logStatus() })));
 
 /* ------------------------------------------------------------------ */
-/* Süre uyarıları                                                      */
+/* Expiry warnings                                                     */
 /* ------------------------------------------------------------------ */
 
-app.get("/api/uyarilar", sar((_req, res) => {
-  const bugun = new Date(); bugun.setHours(0, 0, 0, 0);
-  const cikti = [];
+app.get("/api/warnings", wrap((_req, res) => {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const out = [];
 
-  for (const [tabloAdi, tanim] of Object.entries(TABLOLAR)) {
-    const uyariliKolonlar = tanim.kolon.filter((k) => k.uyari);
-    if (!uyariliKolonlar.length) continue;
+  for (const [tableName, def] of Object.entries(TABLES)) {
+    const warnColumns = def.columns.filter((c) => c.warnDays);
+    if (!warnColumns.length) continue;
 
-    for (const satir of db.tablo(tabloAdi)) {
-      if (["Ayrıldı", "Satıldı", "Arşiv", "Boşaltıldı", "Pasif"].includes(satir.durum)) continue;
-      for (const k of uyariliKolonlar) {
-        const ham = String(satir[k.k] || "").trim();
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(ham)) continue;
-        const t = new Date(ham + "T00:00:00");
-        const kalan = Math.round((t - bugun) / 86400000);
-        if (kalan > k.uyari) continue;
-        const kisi = satir.personelKod ? db.satirBul("personel", (x) => x.kod === satir.personelKod) : null;
-        if (tabloAdi === "kontrat" && !kontrat.uyarilsinMi(satir, kalan)) continue;
-        cikti.push({
-          tablo: tabloAdi,
-          tabloAd: tanim.ad,
-          id: satir._id,
-          kim: satir.ad || satir.plaka || satir.kod || kisi?.ad || "—",
-          href: tabloAdi === "kontrat" && kisi ? `#d/personel/${kisi._id}` : null,
-          alan: k.b,
-          tarih: ham,
-          kalan,
-          seviye: kalan < 0 ? "gecti" : kalan <= 15 ? "kritik" : "yaklasiyor",
+    for (const row of db.table(tableName)) {
+      if (["Left", "Sold", "Archived", "Vacated", "Inactive"].includes(row.status)) continue;
+      for (const c of warnColumns) {
+        const raw = String(row[c.key] || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) continue;
+        const d = new Date(raw + "T00:00:00");
+        const daysLeft = Math.round((d - today) / 86400000);
+        if (daysLeft > c.warnDays) continue;
+        const person = row.employeeCode ? db.findRow("employees", (x) => x.code === row.employeeCode) : null;
+        if (tableName === "contracts" && !contracts.shouldWarn(row, daysLeft)) continue;
+        out.push({
+          table: tableName,
+          tableName: def.name,
+          id: row._id,
+          who: row.name || row.plate || row.code || person?.name || "—",
+          href: tableName === "contracts" && person ? `#d/employees/${person._id}` : null,
+          field: c.label,
+          date: raw,
+          daysLeft,
+          level: daysLeft < 0 ? "past" : daysLeft <= 15 ? "critical" : "soon",
         });
       }
     }
   }
-  cikti.sort((a, b) => a.kalan - b.kalan);
-  res.json(cikti);
+  out.sort((a, b) => a.daysLeft - b.daysLeft);
+  res.json(out);
 }));
 
 /* ------------------------------------------------------------------ */
 
-// Gün dönünce çalışma dönemi biten / başlayan kişilerin durumu güncellenir.
-setInterval(() => { try { kontrat.esitle(); } catch (e) { console.error(`[kontrat] ${e.message}`); } }, 3600_000).unref();
+// When the day turns, the status of people whose employment period ends / starts is updated.
+setInterval(() => { try { contracts.sync(); } catch (e) { console.error(`[contracts] ${e.message}`); } }, 3600_000).unref();
 
-// Bir saatten eski bekleyen yüklemeleri temizle.
+// Clean up pending uploads older than an hour.
 setInterval(() => {
-  const sinir = Date.now() - 3600_000;
-  for (const [fis, k] of bekleyen) {
-    if (k.zaman < sinir) { try { fs.unlinkSync(k.yol); } catch {} bekleyen.delete(fis); }
+  const limit = Date.now() - 3600_000;
+  for (const [ticket, p] of pending) {
+    if (p.time < limit) { try { fs.unlinkSync(p.path); } catch {} pending.delete(ticket); }
   }
 }, 600_000).unref();
 
 app.use((req, res) => {
-  if (req.path.startsWith("/api/")) return res.status(404).json({ hata: "Bilinmeyen uç." });
-  if (PAKETLI) return res.type("html").send(Buffer.from(sea.getAsset("index.html")));
-  res.sendFile(path.join(BURASI, "public", "index.html"));
+  if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Unknown endpoint." });
+  if (PACKAGED) return res.type("html").send(Buffer.from(sea.getAsset("index.html")));
+  res.sendFile(path.join(HOME, "public", "index.html"));
 });
 
-/** Paketli sürümde hata olursa pencere hemen kapanmasın, kullanıcı mesajı okuyabilsin. */
-function durVeBekle(mesaj) {
-  console.error("\n  [HATA] " + mesaj + "\n");
-  if (!PAKETLI) process.exit(1);
-  console.error("  Kapatmak için bir tuşa basın veya pencereyi kapatın.");
+/** In the packaged version the window must not close on an error, so the user can read the message. */
+function stopAndWait(message) {
+  console.error("\n  [ERROR] " + message + "\n");
+  if (!PACKAGED) process.exit(1);
+  console.error("  Press any key or close the window to exit.");
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
   process.stdin.once("data", () => process.exit(1));
 }
-process.on("uncaughtException", (e) => durVeBekle(e.message));
+process.on("uncaughtException", (e) => stopAndWait(e.message));
 
 /**
- * Başlangıç verisi: müşteriye giden exe'nin içine gömülen kayıtlar (paketle.mjs --veri).
- * Bu bilgisayarda ilk açılışta ve sistem boşsa bir kez yüklenir; klasör yapısı kurulur,
- * kapanmış puantajların ve kasanın Excel dosyaları yazılır. Kayıt varsa hiçbir şeye dokunulmaz.
+ * Seed data: records embedded in the client's exe (build.mjs --seed).
+ * Loaded once on this computer's first start, if the system is empty; the folder structure is built and the
+ * Excel files of closed timesheets and cash are written. If there are records, nothing is touched.
  */
-function baslangicVerisiniYukle() {
-  if (!PAKETLI || db.ayarlar().baslangicVerisi) return null;
-  let ham;
-  try { ham = Buffer.from(sea.getAsset("baslangic-verisi.json")).toString("utf8"); } catch { return null; }
-  const tarih = new Date().toISOString();
-  const dolu = ["personel", "proje", "ekip", "ev", "musteri", "arac", "zimmet", "avans", "puantaj", "kasa"].some((k) => db.tablo(k).length);
-  if (dolu) {
-    db.ayarKaydet({ baslangicVerisi: { tarih, atlandi: "Bu bilgisayarda zaten kayıt vardı." } });
-    return { atlandi: true };
+function loadSeedData() {
+  if (!PACKAGED || db.settings().seedData) return null;
+  let raw;
+  try { raw = Buffer.from(sea.getAsset("seed-data.json")).toString("utf8"); } catch { return null; }
+  const date = new Date().toISOString();
+  const hasData = ["employees", "projects", "crews", "houses", "clients", "vehicles", "equipment", "advances", "timesheets", "cash"].some((k) => db.table(k).length);
+  if (hasData) {
+    db.saveSettings({ seedData: { date, skipped: "This computer already had records." } });
+    return { skipped: true };
   }
-  const gelen = JSON.parse(ham.replace(/^﻿/, ""));
-  db.iceAktar(gelen?.uygulama === "KADRO DMS" ? gelen.veri : gelen);
-  db.ayarKaydet({ baslangicVerisi: { tarih, kaynak: gelen?.tarih || null } });
-  veriyiHazirla();
-  klasor.yapiyiKur(kok());
+  const incoming = JSON.parse(raw.replace(/^﻿/, ""));
+  db.importData(incoming?.app === "Kadro" ? incoming.data : incoming);
+  db.saveSettings({ seedData: { date, source: incoming?.date || null } });
+  prepareData();
+  folders.buildStructure(root());
   (async () => {
-    for (const p of puantaj.tumDonemler().filter((x) => x.durum === "kapali")) {
-      const tam = klasor.tamYol(kok(), puantajDosyaYolu(p.donem));
-      if (fs.existsSync(tam)) continue;
-      fs.mkdirSync(path.dirname(tam), { recursive: true });
-      fs.writeFileSync(tam, Buffer.from(await excel.puantajYaz(p, puantaj.hesapla(p), puantaj.gunBilgisi(p.donem), puantaj.donemAdi(p.donem))));
+    for (const t of timesheet.allPeriods().filter((x) => x.status === "closed")) {
+      const full = folders.fullPath(root(), timesheetFilePath(t.period));
+      if (fs.existsSync(full)) continue;
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, Buffer.from(await writeTimesheetFile(t)));
     }
-    await kasaDosyalariniYaz();
-  })().catch((e) => console.error(`[başlangıç verisi] dosyalar yazılamadı: ${e.message}`));
-  return { personel: db.tablo("personel").length, proje: db.tablo("proje").length };
+    await writeCashFiles();
+  })().catch((e) => console.error(`[seed data] files could not be written: ${e.message}`));
+  return { employees: db.table("employees").length, projects: db.table("projects").length };
 }
-let baslangic = null;
-try { baslangic = baslangicVerisiniYukle(); } catch (e) { console.error(`[başlangıç verisi] yüklenemedi: ${e.message}`); }
+let seed = null;
+try { seed = loadSeedData(); } catch (e) { console.error(`[seed data] could not be loaded: ${e.message}`); }
 
-const sunucu = app.listen(PORT, "127.0.0.1", () => {
-  const adres = `http://localhost:${PORT}`;
+const server = app.listen(PORT, "127.0.0.1", () => {
+  const url = `http://localhost:${PORT}`;
   console.log("");
-  console.log("  ACME MÜHENDİSLİK — Belge Yönetim Sistemi");
+  console.log("  Kadro — Workforce Management · ACME ENGINEERING");
   console.log("  " + "─".repeat(46));
-  console.log(`  Adres        : ${adres}`);
-  console.log(`  Belge kökü   : ${kok()}`);
-  console.log(`  Yapay zekâ   : ${db.ayarlar().apiAnahtari || process.env.ANTHROPIC_API_KEY ? "açık" : "kapalı (API anahtarı girilmedi)"}`);
-  console.log(`  Bilgisayar   : ${os.hostname()}`);
-  if (baslangic?.personel !== undefined) console.log(`  Hazır veri   : yüklendi (${baslangic.personel} personel, ${baslangic.proje} proje)`);
+  console.log(`  Address      : ${url}`);
+  console.log(`  Document root: ${root()}`);
+  console.log(`  AI           : ${db.settings().apiKey || process.env.ANTHROPIC_API_KEY ? "on" : "off (no API key entered)"}`);
+  console.log(`  Computer     : ${os.hostname()}`);
+  if (seed?.employees !== undefined) console.log(`  Seed data    : loaded (${seed.employees} employees, ${seed.projects} projects)`);
   console.log("");
-  console.log("  Kapatmak için bu pencereyi kapatın.");
+  console.log("  Close this window to stop.");
   console.log("");
-  if (!process.env.KADRO_TARAYICI_ACMA && process.platform === "win32") {
-    exec(`start "" "${adres}"`);
+  if (!process.env.KADRO_NO_BROWSER && process.platform === "win32") {
+    exec(`start "" "${url}"`);
   }
 });
 
-sunucu.on("error", (e) => {
-  if (e.code !== "EADDRINUSE") return durVeBekle(e.message);
-  // Program zaten açık (ikinci kez çift tıklandı): mevcut olanı tarayıcıda göster.
-  console.log(`  KADRO zaten çalışıyor, tarayıcıda açılıyor: http://localhost:${PORT}`);
-  if (!process.env.KADRO_TARAYICI_ACMA && process.platform === "win32") exec(`start "" "http://localhost:${PORT}"`);
+server.on("error", (e) => {
+  if (e.code !== "EADDRINUSE") return stopAndWait(e.message);
+  // The program is already running (double-clicked twice): show the running one in the browser.
+  console.log(`  Kadro is already running, opening it in the browser: http://localhost:${PORT}`);
+  if (!process.env.KADRO_NO_BROWSER && process.platform === "win32") exec(`start "" "http://localhost:${PORT}"`);
   setTimeout(() => process.exit(0), 1500);
 });

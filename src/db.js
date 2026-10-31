@@ -1,153 +1,155 @@
 /**
- * Basit JSON veri deposu. Tüm veriler veri/db.json içinde tutulur —
- * yedeklemek için o tek dosyayı kopyalamak yeterlidir.
+ * Minimal JSON data store. Everything lives in data/db.json —
+ * copying that one file is a complete backup.
  */
 import fs from "node:fs";
 import path from "node:path";
 
-const BOS = {
-  personel: [], zimmet: [], ekip: [], arac: [], proje: [], ev: [], musteri: [], belge: [],
-  avans: [], puantaj: [],
-  notlar: [],               // kişi notları (personel sayfasındaki Notlar paneli, bkz. notlar.js)
-  kontrat: [],              // çalışma dönemleri: kişi × proje × başlangıç–bitiş (bkz. kontrat.js)
-  kasa: [],
-  kasaSilinen: [],          // elle silinen otomatik kasa satırları: sistem bunları bir daha üretmez
-  ongoru: {},
-  odeme: [],                // Ödemeler ekranında "ödendi" işaretlenen kalemler (maaş, yemek parası, kira)               // öngörü tablosunda elle düzeltilen tahmin hücreleri
-  asistan: [],              // sesli komutla onaylanan işlemler (geri alma bilgisiyle)
-  ayarlar: {
-    belgeKoku: "",
-    apiAnahtari: "",
-    aiModu: "karma",          // karma | sadeceAi | sadeceKural
-    kullanici: "Yönetici",
-    esik: 0.72,               // kural güveni bu değerin altındaysa Claude'a sorulur
+const EMPTY = {
+  employees: [], equipment: [], crews: [], vehicles: [], projects: [], houses: [], clients: [], documents: [],
+  advances: [], timesheets: [],
+  notes: [],                // per-person notes (Notes panel on the employee page, see notes.js)
+  contracts: [],            // employment periods: person × project × start–end (see contracts.js)
+  cash: [],
+  cashDeleted: [],          // automatic cash rows deleted by hand: the system never generates them again
+  forecast: {},             // forecast cells corrected by hand
+  payments: [],             // items marked "paid" on the Payments screen (salary, meal allowance, rent)
+  assistantLog: [],         // actions approved through voice commands (with undo information)
+  settings: {
+    documentRoot: "",
+    apiKey: "",
+    aiMode: "hybrid",         // hybrid | aiOnly | rulesOnly
+    user: "Manager",
+    threshold: 0.72,          // below this rule confidence, Claude is asked
   },
 };
 
-let dosyaYolu = null;
-let veri = null;
+let filePath = null;
+let data = null;
 
-export function baslat(veriDizini) {
-  fs.mkdirSync(veriDizini, { recursive: true });
-  dosyaYolu = path.join(veriDizini, "db.json");
-  if (fs.existsSync(dosyaYolu)) {
+export function init(dataDir) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  filePath = path.join(dataDir, "db.json");
+  if (fs.existsSync(filePath)) {
     try {
-      veri = { ...structuredClone(BOS), ...JSON.parse(fs.readFileSync(dosyaYolu, "utf8")) };
-      veri.ayarlar = { ...BOS.ayarlar, ...(veri.ayarlar || {}) };
+      data = { ...structuredClone(EMPTY), ...JSON.parse(fs.readFileSync(filePath, "utf8")) };
+      data.settings = { ...EMPTY.settings, ...(data.settings || {}) };
     } catch (e) {
-      const yedek = `${dosyaYolu}.bozuk-${Date.now()}`;
-      fs.copyFileSync(dosyaYolu, yedek);
-      console.error(`[db] db.json okunamadı, yedeklendi: ${yedek}`);
-      veri = structuredClone(BOS);
+      const copy = `${filePath}.corrupt-${Date.now()}`;
+      fs.copyFileSync(filePath, copy);
+      console.error(`[db] db.json could not be read, saved a copy: ${copy}`);
+      data = structuredClone(EMPTY);
     }
   } else {
-    veri = structuredClone(BOS);
-    yaz();
+    data = structuredClone(EMPTY);
+    save();
   }
-  return veri;
+  return data;
 }
 
-/** Yedek dosyasına girecek veri: API anahtarları bilgisayardan çıkmaz. */
-export function disaAktar() {
-  const kopya = structuredClone(veri);
-  delete kopya.ayarlar.apiAnahtari;
-  delete kopya.ayarlar.asistanAnahtari;
-  return kopya;
+/** Data for a backup file: API keys never leave this computer. */
+export function exportData() {
+  const copy = structuredClone(data);
+  delete copy.settings.apiKey;
+  delete copy.settings.assistantKey;
+  return copy;
 }
 
 /**
- * Yedekten geri yükler. Mevcut db.json önce veri/yedekler altına kopyalanır.
- * Bu bilgisayara ait ayarlar (belge kökü, API anahtarı) korunur.
- * Döner: yedeklenen dosyanın yolu.
+ * Restores from a backup. The current db.json is first copied to data/backups.
+ * Settings that belong to this computer (document root, API keys) are kept.
+ * Returns: the path of the backup that was taken.
  */
-export function iceAktar(gelen) {
-  if (!gelen || typeof gelen !== "object" || Array.isArray(gelen)) throw new Error("Yedek dosyası okunamadı.");
-  const tablolar = Object.keys(BOS).filter((k) => Array.isArray(BOS[k]));
-  if (!tablolar.some((k) => Array.isArray(gelen[k]))) throw new Error("Bu dosya bir KADRO yedeği değil.");
-  for (const k of tablolar) {
-    if (k in gelen && !Array.isArray(gelen[k])) throw new Error(`Yedekte "${k}" bölümü bozuk.`);
+export function importData(incoming) {
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) throw new Error("The backup file could not be read.");
+  const tables = Object.keys(EMPTY).filter((k) => Array.isArray(EMPTY[k]));
+  if (!tables.some((k) => Array.isArray(incoming[k]))) throw new Error("This file is not a Kadro backup.");
+  for (const k of tables) {
+    if (k in incoming && !Array.isArray(incoming[k])) throw new Error(`The "${k}" section of the backup is corrupt.`);
   }
-  if ("ongoru" in gelen && (typeof gelen.ongoru !== "object" || Array.isArray(gelen.ongoru))) throw new Error('Yedekte "ongoru" bölümü bozuk.');
+  if ("forecast" in incoming && (typeof incoming.forecast !== "object" || Array.isArray(incoming.forecast))) {
+    throw new Error('The "forecast" section of the backup is corrupt.');
+  }
 
-  const eskiYedek = yedekAl("yuklemeden-once");
+  const previous = backup("before-import");
 
-  const buBilgisayar = {
-    belgeKoku: veri.ayarlar.belgeKoku, apiAnahtari: veri.ayarlar.apiAnahtari,
-    asistanAdres: veri.ayarlar.asistanAdres || "", asistanAnahtari: veri.ayarlar.asistanAnahtari || "",
+  const thisComputer = {
+    documentRoot: data.settings.documentRoot, apiKey: data.settings.apiKey,
+    assistantUrl: data.settings.assistantUrl || "", assistantKey: data.settings.assistantKey || "",
   };
-  veri = { ...structuredClone(BOS), ...structuredClone(gelen) };
-  veri.ayarlar = { ...BOS.ayarlar, ...(gelen.ayarlar || {}), ...buBilgisayar };
-  yaz();
-  return eskiYedek;
+  data = { ...structuredClone(EMPTY), ...structuredClone(incoming) };
+  data.settings = { ...EMPTY.settings, ...(incoming.settings || {}), ...thisComputer };
+  save();
+  return previous;
 }
 
-/** db.json'ı veri/yedekler altına kopyalar. Döner: yedeğin yolu. */
-export function yedekAl(etiket) {
-  const klasor = path.join(path.dirname(dosyaYolu), "yedekler");
-  fs.mkdirSync(klasor, { recursive: true });
-  const damga = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
-  const hedef = path.join(klasor, `db-${damga}-${etiket}.json`);
-  fs.copyFileSync(dosyaYolu, hedef);
-  return hedef;
+/** Copies db.json to data/backups. Returns: the path of the copy. */
+export function backup(label) {
+  const dir = path.join(path.dirname(filePath), "backups");
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
+  const target = path.join(dir, `db-${stamp}-${label}.json`);
+  fs.copyFileSync(filePath, target);
+  return target;
 }
 
 /**
- * Bütün kayıtları siler, ayarlar (belge kökü, API anahtarı, kur…) kalır. Önce yedek alınır.
- * Exe'ye gömülü başlangıç verisi bir daha yüklenmesin diye işaret bırakılır.
- * Döner: yedeğin yolu.
+ * Deletes every record; settings (document root, API keys, rates…) stay. A backup is taken first.
+ * Leaves a marker so that seed data embedded in the exe is not loaded again.
+ * Returns: the path of the backup.
  */
-export function sifirla() {
-  const yedek = yedekAl("sifirlamadan-once");
-  const ayar = veri.ayarlar;
-  veri = structuredClone(BOS);
-  veri.ayarlar = { ...BOS.ayarlar, ...ayar, baslangicVerisi: { tarih: new Date().toISOString(), atlandi: "Kayıtlar sıfırlandı." } };
-  yaz();
-  return yedek;
+export function reset() {
+  const copy = backup("before-reset");
+  const settings = data.settings;
+  data = structuredClone(EMPTY);
+  data.settings = { ...EMPTY.settings, ...settings, seedData: { date: new Date().toISOString(), skipped: "Records were reset." } };
+  save();
+  return copy;
 }
 
-export function tum() { return veri; }
-export function tablo(ad) { return veri[ad] || []; }
-export function ayarlar() { return veri.ayarlar; }
+export function all() { return data; }
+export function table(name) { return data[name] || []; }
+export function settings() { return data.settings; }
 
-export function ayarKaydet(yeni) {
-  veri.ayarlar = { ...veri.ayarlar, ...yeni };
-  yaz();
-  return veri.ayarlar;
+export function saveSettings(changes) {
+  data.settings = { ...data.settings, ...changes };
+  save();
+  return data.settings;
 }
 
-export function yaz() {
-  const gecici = `${dosyaYolu}.tmp`;
-  fs.writeFileSync(gecici, JSON.stringify(veri, null, 2), "utf8");
-  fs.renameSync(gecici, dosyaYolu);
+export function save() {
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+  fs.renameSync(tmp, filePath);
 }
 
-export function yeniId() {
+export function newId() {
   return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function satirEkle(tabloAdi, satir) {
-  const s = { _id: yeniId(), _olusturma: new Date().toISOString(), ...satir };
-  veri[tabloAdi].push(s);
-  yaz();
-  return s;
+export function insertRow(tableName, row) {
+  const r = { _id: newId(), _created: new Date().toISOString(), ...row };
+  data[tableName].push(r);
+  save();
+  return r;
 }
 
-export function satirGuncelle(tabloAdi, id, alanlar) {
-  const s = veri[tabloAdi].find((x) => x._id === id);
-  if (!s) return null;
-  Object.assign(s, alanlar, { _guncelleme: new Date().toISOString() });
-  yaz();
-  return s;
+export function updateRow(tableName, id, fields) {
+  const r = data[tableName].find((x) => x._id === id);
+  if (!r) return null;
+  Object.assign(r, fields, { _updated: new Date().toISOString() });
+  save();
+  return r;
 }
 
-export function satirSil(tabloAdi, id) {
-  const i = veri[tabloAdi].findIndex((x) => x._id === id);
+export function deleteRow(tableName, id) {
+  const i = data[tableName].findIndex((x) => x._id === id);
   if (i < 0) return false;
-  veri[tabloAdi].splice(i, 1);
-  yaz();
+  data[tableName].splice(i, 1);
+  save();
   return true;
 }
 
-export function satirBul(tabloAdi, esle) {
-  return veri[tabloAdi].find(esle) || null;
+export function findRow(tableName, match) {
+  return data[tableName].find(match) || null;
 }

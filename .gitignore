@@ -1,25 +1,22 @@
 node_modules/
-insa/
+build/
 *.log
 
-# Gerçek veri ve belgeler (geliştirmede ./veri ve ./ACME MUHENDISLIK)
-veri/
-ACME MUHENDISLIK/
+# Real data and documents (in development: ./data and ./ACME ENGINEERING)
+data/
+ACME ENGINEERING/
 
-# Paketler: exe'de sesli komut anahtarı gömülü; ornek-veri müşteri verisinden türetildi.
-# Sadece müşteri paketine giren BENİ OKU şablonu depoda.
-dagitim/*
-!dagitim/musteri/
-dagitim/musteri/*
-!dagitim/musteri/BENİ OKU.txt
+# Packages: the exe has the voice-command key embedded. Only the README that goes into the client package is in the repo.
+dist/*
+!dist/README.txt
 
-# Canlı sunucudan alınan akış yedekleri ve indirilen komut kayıtları (kişisel veri)
-n8n/yedek/
-n8n/kayitlar/
+# Workflow backups taken from the live server and downloaded command logs (personal data)
+n8n/backups/
+n8n/logs/
 
-# Test çalışma klasörü ve arayüz testi çıktıları
-test/.calisma/
-test/cikti/
+# Test work folder and UI test output
+test/.work/
+test/output/
 
-# Editör / araç ayarları
+# Editor / tool settings
 .claude/

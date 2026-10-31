@@ -1,3675 +1,3677 @@
-/* KADRO Belge Yönetim Sistemi — arayüz */
+/* Kadro — Workforce Management: user interface */
 
-const ana = document.getElementById("ana");
-const gezinti = document.getElementById("gezinti");
+const main = document.getElementById("main");
+const nav = document.getElementById("nav");
 
-const S = { durum: null, uyarilar: [], hedefler: [], agac: null, acik: new Set(), secili: null };
+const S = { status: null, warnings: [], targets: [], tree: null, open: new Set(), selected: null };
 
-/* ---------------- yardımcılar ---------------- */
+/* ---------------- helpers ---------------- */
 
-const kacir = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const el = (h) => { const d = document.createElement("div"); d.innerHTML = h.trim(); return d.firstElementChild; };
 
-async function api(yol, secenek = {}) {
-  const y = await fetch(`/api${yol}`, {
-    ...secenek,
-    headers: secenek.body instanceof FormData ? undefined : { "Content-Type": "application/json", ...(secenek.headers || {}) },
+async function api(path, options = {}) {
+  const r = await fetch(`/api${path}`, {
+    ...options,
+    headers: options.body instanceof FormData ? undefined : { "Content-Type": "application/json", ...(options.headers || {}) },
   });
-  const metin = await y.text();
-  let veri; try { veri = metin ? JSON.parse(metin) : {}; } catch { veri = { hata: metin.slice(0, 200) }; }
-  if (!y.ok) throw new Error(veri.hata || `Sunucu hatası (${y.status})`);
-  return veri;
+  const text = await r.text();
+  let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text.slice(0, 200) }; }
+  if (!r.ok) throw new Error(data.error || `Server error (${r.status})`);
+  return data;
 }
 
-let bildirimSayaci = 0;
-function bildir(baslik, mesaj = "", tip = "") {
-  const kutu = document.getElementById("bildirimler");
-  const id = ++bildirimSayaci;
-  const b = el(`<div class="bildirim ${tip}" data-b="${id}"><div><b>${kacir(baslik)}</b>${mesaj ? kacir(mesaj) : ""}</div></div>`);
-  kutu.appendChild(b);
-  setTimeout(() => b.remove(), tip === "hata" ? 8000 : 4200);
+let toastCounter = 0;
+function toast(title, message = "", kind = "") {
+  const box = document.getElementById("toasts");
+  const id = ++toastCounter;
+  const b = el(`<div class="toast ${kind}" data-t="${id}"><div><b>${esc(title)}</b>${message ? esc(message) : ""}</div></div>`);
+  box.appendChild(b);
+  setTimeout(() => b.remove(), kind === "error" ? 8000 : 4200);
 }
-const hataBildir = (e) => bildir("İşlem tamamlanamadı", e.message || String(e), "hata");
+const toastError = (e) => toast("Could not complete the action", e.message || String(e), "error");
 
-function onay(baslik, mesaj, onayYazi = "Evet, devam et") {
-  return new Promise((coz) => {
-    const p = el(`<div class="pano"><div class="pano-ic">
-      <div class="pano-bas"><h3>${kacir(baslik)}</h3></div>
-      <div class="pano-govde">${kacir(mesaj)}</div>
-      <div class="pano-alt"><button class="dg" data-h>Vazgeç</button><button class="dg bas" data-e>${kacir(onayYazi)}</button></div>
+function confirmBox(title, message, yesText = "Yes, continue") {
+  return new Promise((resolve) => {
+    const p = el(`<div class="modal"><div class="modal-box">
+      <div class="modal-head"><h3>${esc(title)}</h3></div>
+      <div class="modal-body">${esc(message)}</div>
+      <div class="modal-foot"><button class="btn" data-no>Cancel</button><button class="btn primary" data-yes>${esc(yesText)}</button></div>
     </div></div>`);
-    const kapat = (v) => { p.remove(); coz(v); };
-    p.querySelector("[data-h]").onclick = () => kapat(false);
-    p.querySelector("[data-e]").onclick = () => kapat(true);
-    p.onclick = (ev) => { if (ev.target === p) kapat(false); };
-    document.getElementById("panoAlani").appendChild(p);
-    p.querySelector("[data-e]").focus();
+    const close = (v) => { p.remove(); resolve(v); };
+    p.querySelector("[data-no]").onclick = () => close(false);
+    p.querySelector("[data-yes]").onclick = () => close(true);
+    p.onclick = (ev) => { if (ev.target === p) close(false); };
+    document.getElementById("modalHost").appendChild(p);
+    p.querySelector("[data-yes]").focus();
   });
 }
 
-const boyutMetni = (b) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
+/** "1 period" / "2 periods". */
+const plural = (n, one, many = `${one}s`) => `${n} ${Number(String(n).replace(/,/g, "")) === 1 ? one : many}`;
 
-function gunFarki(tarih) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(tarih || "")) return null;
-  const bugun = new Date(); bugun.setHours(0, 0, 0, 0);
-  return Math.round((new Date(tarih + "T00:00:00") - bugun) / 86400000);
+const sizeText = (b) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
+
+function daysUntil(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "")) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((new Date(date + "T00:00:00") - today) / 86400000);
 }
 
-/* ---------------- gezinti ---------------- */
+/* ---------------- navigation ---------------- */
 
 const MENU = [
-  { grup: "Genel" },
-  { id: "panel", ad: "Panel", ik: "◆" },
-  { id: "ongoru", ad: "Öngörü", ik: "◔" },
-  { id: "agac", ad: "Klasör Ağacı", ik: "▤" },
-  { id: "yukle", ad: "Belge Yükle", ik: "↑" },
-  { grup: "Kayıtlar" },
-  { id: "t/personel", ad: "Personel", ik: "◉", sayac: "personel" },
-  { id: "t/kontrat", ad: "Çalışma Dönemleri", ik: "⇥", sayac: "kontrat" },
-  { id: "t/ekip", ad: "Ekipler", ik: "◎", sayac: "ekip" },
-  { id: "t/zimmet", ad: "Zimmet", ik: "▣", sayac: "zimmet" },
-  { id: "t/proje", ad: "Projeler", ik: "◈", sayac: "proje" },
-  { id: "t/ev", ad: "Evler", ik: "⌂", sayac: "ev" },
-  { id: "t/arac", ad: "Araçlar", ik: "▤", sayac: "arac" },
-  { id: "t/musteri", ad: "Müşteriler", ik: "◇", sayac: "musteri" },
-  { grup: "Puantaj, Maaş ve Kasa" },
-  { id: "puantaj", ad: "Puantaj", ik: "▥" },
-  { id: "t/avans", ad: "Avanslar", ik: "↧", sayac: "avans" },
-  { id: "odemeler", ad: "Ödemeler", ik: "✓", sayac: "odemeBekleyen", alarm: true },
-  { id: "kasa", ad: "Kasa", ik: "₺" },
-  { id: "istatistik", ad: "Çalışan İstatistikleri", ik: "▲" },
-  { grup: "Kayıt Defteri" },
-  { id: "t/belge", ad: "Belge Defteri", ik: "▦", sayac: "belge" },
-  { id: "ayarlar", ad: "Ayarlar", ik: "⚙" },
+  { group: "General" },
+  { id: "dashboard", name: "Dashboard", ico: "◆" },
+  { id: "forecast", name: "Forecast", ico: "◔" },
+  { id: "tree", name: "Folder Tree", ico: "▤" },
+  { id: "upload", name: "Upload Documents", ico: "↑" },
+  { group: "Records" },
+  { id: "t/employees", name: "Employees", ico: "◉", counter: "employees" },
+  { id: "t/contracts", name: "Employment Periods", ico: "⇥", counter: "contracts" },
+  { id: "t/crews", name: "Crews", ico: "◎", counter: "crews" },
+  { id: "t/equipment", name: "Equipment", ico: "▣", counter: "equipment" },
+  { id: "t/projects", name: "Projects", ico: "◈", counter: "projects" },
+  { id: "t/houses", name: "Houses", ico: "⌂", counter: "houses" },
+  { id: "t/vehicles", name: "Vehicles", ico: "▤", counter: "vehicles" },
+  { id: "t/clients", name: "Clients", ico: "◇", counter: "clients" },
+  { group: "Timesheets, Pay and Cash" },
+  { id: "timesheet", name: "Timesheets", ico: "▥" },
+  { id: "t/advances", name: "Advances", ico: "↧", counter: "advances" },
+  { id: "payments", name: "Payments", ico: "✓", counter: "paymentsDue", alarm: true },
+  { id: "cash", name: "Cash", ico: "€" },
+  { id: "statistics", name: "Employee Statistics", ico: "▲" },
+  { group: "Registers" },
+  { id: "t/documents", name: "Document Register", ico: "▦", counter: "documents" },
+  { id: "settings", name: "Settings", ico: "⚙" },
 ];
 
-function gezintiCiz() {
-  let su = (location.hash || "#panel").slice(1);
-  if (su.startsWith("d/")) su = `t/${su.split("/")[1]}`;
-  if (su.startsWith("puantaj/")) su = "puantaj";
-  if (su.startsWith("kasa/") || su === "t/kasa") su = "kasa";
-  if (su.startsWith("odemeler/")) su = "odemeler";
-  if (su.startsWith("calisan/")) su = "t/personel";
-  gezinti.innerHTML = "";
+function renderNav() {
+  let here = (location.hash || "#dashboard").slice(1);
+  if (here.startsWith("d/")) here = `t/${here.split("/")[1]}`;
+  if (here.startsWith("timesheet/")) here = "timesheet";
+  if (here.startsWith("cash/") || here === "t/cash") here = "cash";
+  if (here.startsWith("payments/")) here = "payments";
+  if (here.startsWith("employee/")) here = "t/employees";
+  nav.innerHTML = "";
   for (const m of MENU) {
-    if (m.grup) { gezinti.appendChild(el(`<div class="nav-baslik">${kacir(m.grup)}</div>`)); continue; }
-    const sayi = m.sayac ? S.durum?.sayilar?.[m.sayac] : null;
-    const alarm = m.id === "panel" && S.uyarilar.length;
-    const rz = alarm ? `<span class="rz alarm">${S.uyarilar.length}</span>`
-      : (sayi ? `<span class="rz ${m.alarm ? "alarm" : ""}" ${m.alarm ? `title="Vadesi gelmiş, ödenmemiş kalem"` : ""}>${sayi}</span>` : "");
-    const a = el(`<a class="nav-og ${su === m.id ? "aktif" : ""}" href="#${m.id}">
-      <span class="ik">${m.ik}</span><span>${kacir(m.ad)}</span>${rz}</a>`);
-    gezinti.appendChild(a);
+    if (m.group) { nav.appendChild(el(`<div class="nav-title">${esc(m.group)}</div>`)); continue; }
+    const n = m.counter ? S.status?.counts?.[m.counter] : null;
+    const alarm = m.id === "dashboard" && S.warnings.length;
+    const count = alarm ? `<span class="count alarm">${S.warnings.length}</span>`
+      : (n ? `<span class="count ${m.alarm ? "alarm" : ""}" ${m.alarm ? `title="Due and not yet paid"` : ""}>${n}</span>` : "");
+    const a = el(`<a class="nav-item ${here === m.id ? "active" : ""}" href="#${m.id}">
+      <span class="ico">${m.ico}</span><span>${esc(m.name)}</span>${count}</a>`);
+    nav.appendChild(a);
   }
 }
 
-function ustBilgiCiz() {
-  const d = S.durum;
-  document.getElementById("markaAlt").textContent = d ? `sürüm ${d.surum} · port ${d.port}` : "";
-  document.getElementById("kokYolu").textContent = d ? d.belgeKoku : "";
-  const n = document.getElementById("aiDurum");
-  n.className = `durum-nokta ${d?.apiAnahtariVar ? "acik" : "kapali"}`;
-  n.querySelector("span").textContent = d?.apiAnahtariVar
-    ? `yapay zekâ açık · ${{ karma: "karma", sadeceAi: "tam AI", sadeceKural: "kural" }[d.aiModu]}`
-    : "yapay zekâ kapalı";
+function renderHeader() {
+  const d = S.status;
+  document.getElementById("brandSub").textContent = d ? `version ${d.version} · port ${d.port}` : "";
+  document.getElementById("rootPath").textContent = d ? d.documentRoot : "";
+  const n = document.getElementById("aiStatus");
+  n.className = `status-dot ${d?.apiKeySet ? "open" : "closed"}`;
+  n.querySelector("span").textContent = d?.apiKeySet
+    ? `AI on · ${{ hybrid: "hybrid", aiOnly: "AI only", rulesOnly: "rules" }[d.aiMode]}`
+    : "AI off";
 }
 
-/* ---------------- PANEL ---------------- */
+/* ---------------- DASHBOARD ---------------- */
 
-async function panelCiz() {
-  const d = S.durum;
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas">
-    <div><h2>Panel</h2><p>Sistemin özeti, yaklaşan süreler ve hızlı işlemler.</p></div>
-    <div class="bas-arac">
-      <button class="dg" data-is="yenile">Yenile</button>
-      <button class="dg bas" data-is="kur">Yapıyı Diske Kur</button>
+async function renderDashboard() {
+  const d = S.status;
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head">
+    <div><h2>Dashboard</h2><p>System summary, upcoming deadlines and quick actions.</p></div>
+    <div class="head-tools">
+      <button class="btn" data-do="refresh">Refresh</button>
+      <button class="btn primary" data-do="build">Build Folders on Disk</button>
     </div></div>`));
 
-  if (!d.kurulu) {
-    ana.appendChild(el(`<div class="kart"><div class="kart-govde">
+  if (!d.built) {
+    main.appendChild(el(`<div class="card"><div class="card-body">
       <div style="display:flex;gap:13px;align-items:flex-start">
         <span style="color:var(--accent);font-size:20px;line-height:1">!</span>
-        <div style="min-width:0"><div style="font-weight:600;margin-bottom:3px">Klasör yapısı henüz diskte yok</div>
+        <div style="min-width:0"><div style="font-weight:600;margin-bottom:3px">The folder structure is not on disk yet</div>
         <div style="color:var(--text-2);font-size:13px">
-          "Yapıyı Diske Kur" düğmesine basınca <code style="font-family:var(--f-mono);font-size:12px;overflow-wrap:anywhere">${kacir(d.belgeKoku)}</code>
-          altında tüm bölümler açılır. Var olan klasörlere dokunulmaz.</div></div>
+          "Build Folders on Disk" creates every section under <code style="font-family:var(--f-mono);font-size:12px;overflow-wrap:anywhere">${esc(d.documentRoot)}</code>.
+          Existing folders are left alone.</div></div>
       </div></div></div>`));
   }
 
-  const s = d.sayilar;
-  ana.appendChild(el(`<div class="izgara">
-    <a class="sayac" href="#t/personel"><b>${s.personel}</b><span>Personel</span><span class="ek">15 klasörlü dosya</span></a>
-    <a class="sayac" href="#t/ekip"><b>${s.ekip}</b><span>Aktif ekip</span><span class="ek">yemek ve zimmet</span></a>
-    <a class="sayac" href="#t/zimmet"><b>${s.zimmet}</b><span>Açık zimmet</span><span class="ek">iade bekleyen</span></a>
-    <a class="sayac" href="#t/proje"><b>${s.proje}</b><span>Aktif proje</span><span class="ek">devam eden iş</span></a>
-    <a class="sayac" href="#t/ev"><b>${s.ev}</b><span>Ev</span><span class="ek">yurt dışı konaklama</span></a>
-    <a class="sayac" href="#t/arac"><b>${s.arac}</b><span>Araç</span><span class="ek">muayene ve poliçe takibi</span></a>
-    <a class="sayac" href="#t/musteri"><b>${s.musteri}</b><span>Müşteri</span><span class="ek">cari ve teklif</span></a>
-    <a class="sayac" href="#t/belge"><b>${s.belge}</b><span>Kayıtlı belge</span><span class="ek">sisteme giren dosya</span></a>
+  const s = d.counts;
+  main.appendChild(el(`<div class="tiles">
+    <a class="tile" href="#t/employees"><b>${s.employees}</b><span>Employees</span><span class="extra">15-folder personnel file</span></a>
+    <a class="tile" href="#t/crews"><b>${s.crews}</b><span>Active crews</span><span class="extra">meals and equipment</span></a>
+    <a class="tile" href="#t/equipment"><b>${s.equipment}</b><span>Equipment out</span><span class="extra">awaiting return</span></a>
+    <a class="tile" href="#t/projects"><b>${s.projects}</b><span>Active projects</span><span class="extra">work in progress</span></a>
+    <a class="tile" href="#t/houses"><b>${s.houses}</b><span>Houses</span><span class="extra">staff housing abroad</span></a>
+    <a class="tile" href="#t/vehicles"><b>${s.vehicles}</b><span>Vehicles</span><span class="extra">inspection and insurance</span></a>
+    <a class="tile" href="#t/clients"><b>${s.clients}</b><span>Clients</span><span class="extra">accounts and bids</span></a>
+    <a class="tile" href="#t/documents"><b>${s.documents}</b><span>Filed documents</span><span class="extra">files taken into the system</span></a>
   </div>`));
 
-  const uyariKart = el(`<div class="kart">
-    <div class="kart-bas"><h3>Süre Uyarıları</h3><div class="sag">
-      <span style="font-family:var(--f-mono);font-size:10px;color:var(--muted)">${S.uyarilar.length} kayıt</span>
-    </div></div><div id="uyariGovde"></div></div>`);
-  ana.appendChild(uyariKart);
+  const warnCard = el(`<div class="card">
+    <div class="card-head"><h3>Deadline Warnings</h3><div class="right">
+      <span style="font-family:var(--f-mono);font-size:10px;color:var(--muted)">${plural(S.warnings.length, "record")}</span>
+    </div></div><div id="warnBody"></div></div>`);
+  main.appendChild(warnCard);
 
-  const g = uyariKart.querySelector("#uyariGovde");
-  if (!S.uyarilar.length) {
-    g.appendChild(el(`<div class="bos"><div class="bs">Yaklaşan bir süre yok</div>
-      <p>Çalışma izni, oturma izni, pasaport, araç muayenesi, poliçe ve çalışma dönemi (işten çıkış) bitişleri yaklaştığında burada listelenir.</p></div>`));
+  const g = warnCard.querySelector("#warnBody");
+  if (!S.warnings.length) {
+    g.appendChild(el(`<div class="empty"><div class="big">No upcoming deadlines</div>
+      <p>Work permits, residence permits, passports, vehicle inspections, insurance policies and employment period end dates are listed here as they approach.</p></div>`));
   } else {
-    for (const u of S.uyarilar.slice(0, 40)) {
-      const metin = u.kalan < 0 ? `${Math.abs(u.kalan)} gün geçti` : u.kalan === 0 ? "bugün" : `${u.kalan} gün kaldı`;
-      const sat = el(`<a class="uyari-sat" href="${u.href || `#t/${u.tablo}`}">
-        <span class="pul ${u.seviye}">${metin}</span>
-        <span class="kim">${kacir(u.kim)}</span>
-        <span class="ne">${kacir(u.alan)}</span>
-        <span class="tr">${kacir(u.tarih)}</span></a>`);
-      g.appendChild(sat);
+    for (const w of S.warnings.slice(0, 40)) {
+      const text = w.daysLeft < 0 ? `${plural(Math.abs(w.daysLeft), "day")} overdue` : w.daysLeft === 0 ? "today" : `${plural(w.daysLeft, "day")} left`;
+      const row = el(`<a class="warn-row" href="${w.href || `#t/${w.table}`}">
+        <span class="pill ${w.level}">${text}</span>
+        <span class="who">${esc(w.who)}</span>
+        <span class="what">${esc(w.field)}</span>
+        <span class="when">${esc(w.date)}</span></a>`);
+      g.appendChild(row);
     }
   }
 
-  ana.appendChild(el(`<div class="kart">
-    <div class="kart-bas"><h3>Nasıl Çalışır</h3></div>
-    <div class="kart-govde" style="display:grid;gap:11px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))">
+  main.appendChild(el(`<div class="card">
+    <div class="card-head"><h3>How It Works</h3></div>
+    <div class="card-body" style="display:grid;gap:11px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))">
       ${[
-        ["Kayıt gir", "Personel, araç, proje veya müşteri satırı eklediğinizde diskte klasörü şablonuyla birlikte otomatik açılır."],
-        ["Belgeyi bırak", "Belge Yükle ekranına dosyayı sürükleyin. Sistem dosya adını ve PDF/görsel içeriğini okuyup hedef klasörü önerir."],
-        ["Onayla", "Öneriyi kabul edin ya da hedefi değiştirin. Dosya gerçek klasöre taşınır, Belge Defteri'ne kaydedilir."],
-        ["Excel'e aktar", "Her tablo tek tıkla .xlsx iner; Excel'de düzenleyip geri yükleyebilirsiniz."],
+        ["Add a record", "When you add an employee, vehicle, project or client, its folder is created on disk from the template."],
+        ["Drop a document", "Drag a file onto Upload Documents. The system reads the file name and the PDF/image content and suggests a target folder."],
+        ["Confirm", "Accept the suggestion or pick another target. The file is moved into the real folder and logged in the Document Register."],
+        ["Export to Excel", "Every table downloads as .xlsx in one click; edit it in Excel and upload it back."],
       ].map(([b, a]) => `<div><div style="font-family:var(--f-disp);font-weight:600;font-size:15px;margin-bottom:3px">${b}</div>
         <div style="color:var(--text-2);font-size:13px;line-height:1.5">${a}</div></div>`).join("")}
     </div></div>`));
 
-  ana.querySelector('[data-is="yenile"]').onclick = async () => { await durumYukle(); yonlendir(); };
-  ana.querySelector('[data-is="kur"]').onclick = async (ev) => {
+  main.querySelector('[data-do="refresh"]').onclick = async () => { await loadStatus(); route(); };
+  main.querySelector('[data-do="build"]').onclick = async (ev) => {
     ev.target.disabled = true;
     try {
-      const r = await api("/kur", { method: "POST" });
-      bildir("Yapı kuruldu", `${r.acilan.length} klasör açıldı, ${r.mevcut} klasör zaten vardı.`, "iyi");
-      await durumYukle(); yonlendir();
-    } catch (e) { hataBildir(e); ev.target.disabled = false; }
+      const r = await api("/build", { method: "POST" });
+      toast("Folders built", `${r.created.length} folders created, ${r.existing} already existed.`, "good");
+      await loadStatus(); route();
+    } catch (e) { toastError(e); ev.target.disabled = false; }
   };
 }
 
-/* ---------------- KLASÖR AĞACI ---------------- */
+/* ---------------- FOLDER TREE ---------------- */
 
-async function agacCiz() {
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas">
-    <div><h2>Klasör Ağacı</h2><p>Diskteki gerçek durum. Sayılar o klasördeki dosya adedini gösterir.</p></div>
-    <div class="bas-arac">
-      <button class="dg" data-is="tumu">Tümünü aç</button>
-      <button class="dg" data-is="yenile">Yenile</button>
-      <button class="dg bas" data-is="kur">Yapıyı Kur</button>
+async function renderTree() {
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head">
+    <div><h2>Folder Tree</h2><p>What is really on disk. The numbers show how many files each folder holds.</p></div>
+    <div class="head-tools">
+      <button class="btn" data-do="all">Expand all</button>
+      <button class="btn" data-do="refresh">Refresh</button>
+      <button class="btn primary" data-do="build">Build Folders</button>
     </div></div>`));
 
-  const duzen = el(`<div class="agac-duzen">
-    <div class="kart"><div class="kart-bas"><h3>Klasörler</h3>
-      <div class="sag"><span id="toplamDosya" style="font-family:var(--f-mono);font-size:10px;color:var(--muted)"></span></div></div>
-      <div class="agac" id="agacKok"></div></div>
-    <div class="kart"><div class="kart-govde" id="agacDetay"></div></div>
+  const layout = el(`<div class="tree-layout">
+    <div class="card"><div class="card-head"><h3>Folders</h3>
+      <div class="right"><span id="fileTotal" style="font-family:var(--f-mono);font-size:10px;color:var(--muted)"></span></div></div>
+      <div class="tree" id="treeRoot"></div></div>
+    <div class="card"><div class="card-body" id="treeDetail"></div></div>
   </div>`);
-  ana.appendChild(duzen);
+  main.appendChild(layout);
 
-  ana.querySelector('[data-is="yenile"]').onclick = () => { S.agac = null; agacCiz(); };
-  ana.querySelector('[data-is="kur"]').onclick = async () => {
-    try { const r = await api("/kur", { method: "POST" });
-      bildir("Yapı kuruldu", `${r.acilan.length} klasör açıldı.`, "iyi");
-      S.agac = null; agacCiz();
-    } catch (e) { hataBildir(e); }
+  main.querySelector('[data-do="refresh"]').onclick = () => { S.tree = null; renderTree(); };
+  main.querySelector('[data-do="build"]').onclick = async () => {
+    try { const r = await api("/build", { method: "POST" });
+      toast("Folders built", `${r.created.length} folders created.`, "good");
+      S.tree = null; renderTree();
+    } catch (e) { toastError(e); }
   };
-  ana.querySelector('[data-is="tumu"]').onclick = (ev) => {
-    const ac = S.acik.size < 6;
-    S.acik.clear();
-    if (ac) (function gez(l) { for (const d of l) if (d.ch?.length) { S.acik.add(d.yol); gez(d.ch); } })(S.agac?.ch || []);
-    ev.target.textContent = ac ? "Tümünü kapat" : "Tümünü aç";
-    agacGovdeCiz();
+  main.querySelector('[data-do="all"]').onclick = (ev) => {
+    const expand = S.open.size < 6;
+    S.open.clear();
+    if (expand) (function walk(l) { for (const d of l) if (d.ch?.length) { S.open.add(d.path); walk(d.ch); } })(S.tree?.ch || []);
+    ev.target.textContent = expand ? "Collapse all" : "Expand all";
+    renderTreeBody();
   };
 
-  if (!S.agac) {
-    document.getElementById("agacKok").innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-    try { S.agac = await api("/agac"); } catch (e) { hataBildir(e); return; }
+  if (!S.tree) {
+    document.getElementById("treeRoot").innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+    try { S.tree = await api("/tree"); } catch (e) { toastError(e); return; }
   }
-  agacGovdeCiz();
+  renderTreeBody();
 }
 
-function agacGovdeCiz() {
-  const kok = document.getElementById("agacKok");
-  if (!kok) return;
-  const a = S.agac;
-  document.getElementById("toplamDosya").textContent = a.kurulmamis ? "" : `${a.toplamDosya} dosya`;
+function renderTreeBody() {
+  const root = document.getElementById("treeRoot");
+  if (!root) return;
+  const a = S.tree;
+  document.getElementById("fileTotal").textContent = a.notBuilt ? "" : `${plural(a.totalFiles, "file")}`;
 
-  if (a.kurulmamis || !a.ch.length) {
-    kok.innerHTML = `<div class="bos"><div class="bs">Yapı diskte yok</div>
-      <p>Yukarıdaki "Yapıyı Kur" düğmesine basın; tüm bölümler tek seferde açılsın.</p></div>`;
-    document.getElementById("agacDetay").innerHTML = "";
+  if (a.notBuilt || !a.ch.length) {
+    root.innerHTML = `<div class="empty"><div class="big">No folders on disk</div>
+      <p>Press "Build Folders" above to create every section in one go.</p></div>`;
+    document.getElementById("treeDetail").innerHTML = "";
     return;
   }
 
-  const liste = (dugumler) => {
+  const list = (nodes) => {
     const ul = document.createElement("ul");
-    for (const d of dugumler) {
+    for (const d of nodes) {
       const li = document.createElement("li");
-      const acik = S.acik.has(d.yol);
-      const m = /^(\d{2}|KDR-\d{4}-\d{4}|PRJ-\d{4}-\d{4}|MST-\d{4}-\d{4}|EV-\d+)[ -]+(.*)$/.exec(d.ad);
-      const derinlik = d.yol.split("/").length - 1;
-      const sat = el(`<button class="d-sat k${derinlik} ${S.secili === d.yol ? "sec" : ""}" data-yol="${kacir(d.yol)}">
-        <span class="ok ${d.ch.length ? (acik ? "acik" : "") : "yaprak"}">▶</span>
-        ${m ? `<span class="kod">${kacir(m[1])}</span><span class="ad">${kacir(m[2])}</span>` : `<span class="ad">${kacir(d.ad)}</span>`}
-        <span class="adet ${d.toplamDosya ? "dolu" : ""}">${d.toplamDosya || ""}</span></button>`);
-      li.appendChild(sat);
-      if (d.ch.length && acik) li.appendChild(liste(d.ch));
+      const open = S.open.has(d.path);
+      const m = /^(\d{2}|KDR-\d{4}-\d{4}|PRJ-\d{4}-\d{4}|CLI-\d{4}-\d{4}|HSE-\d+)[ -]+(.*)$/.exec(d.name);
+      const depth = d.path.split("/").length - 1;
+      const row = el(`<button class="node l${depth} ${S.selected === d.path ? "sel" : ""}" data-path="${esc(d.path)}">
+        <span class="caret ${d.ch.length ? (open ? "open" : "") : "leaf"}">▶</span>
+        ${m ? `<span class="code">${esc(m[1])}</span><span class="name">${esc(m[2])}</span>` : `<span class="name">${esc(d.name)}</span>`}
+        <span class="count ${d.totalFiles ? "full" : ""}">${d.totalFiles || ""}</span></button>`);
+      li.appendChild(row);
+      if (d.ch.length && open) li.appendChild(list(d.ch));
       ul.appendChild(li);
     }
     return ul;
   };
 
-  kok.innerHTML = "";
-  kok.appendChild(liste(a.ch));
+  root.innerHTML = "";
+  root.appendChild(list(a.ch));
 
-  kok.onclick = (ev) => {
-    const sat = ev.target.closest(".d-sat");
-    if (!sat) return;
-    const yol = sat.dataset.yol;
-    const bul = (l) => { for (const d of l) { if (d.yol === yol) return d; const r = bul(d.ch || []); if (r) return r; } return null; };
-    const dugum = bul(a.ch);
-    if (ev.target.closest(".ok") && dugum?.ch.length) {
-      S.acik.has(yol) ? S.acik.delete(yol) : S.acik.add(yol);
+  root.onclick = (ev) => {
+    const row = ev.target.closest(".node");
+    if (!row) return;
+    const path = row.dataset.path;
+    const find = (l) => { for (const d of l) { if (d.path === path) return d; const r = find(d.ch || []); if (r) return r; } return null; };
+    const node = find(a.ch);
+    if (ev.target.closest(".caret") && node?.ch.length) {
+      S.open.has(path) ? S.open.delete(path) : S.open.add(path);
     } else {
-      if (S.secili === yol && dugum?.ch.length) { S.acik.has(yol) ? S.acik.delete(yol) : S.acik.add(yol); }
-      S.secili = yol;
-      if (dugum?.ch.length) S.acik.add(yol);
+      if (S.selected === path && node?.ch.length) { S.open.has(path) ? S.open.delete(path) : S.open.add(path); }
+      S.selected = path;
+      if (node?.ch.length) S.open.add(path);
     }
-    agacGovdeCiz();
-    if (dugum) agacDetayCiz(dugum);
+    renderTreeBody();
+    if (node) renderTreeDetail(node);
   };
 
-  if (S.secili) {
-    const bul = (l) => { for (const d of l) { if (d.yol === S.secili) return d; const r = bul(d.ch || []); if (r) return r; } return null; };
-    const d = bul(a.ch);
-    if (d) agacDetayCiz(d);
-    else document.getElementById("agacDetay").innerHTML = `<div class="bos"><div class="bs">Klasör artık yok</div><p>Soldan başka bir klasör seçin.</p></div>`;
+  if (S.selected) {
+    const find = (l) => { for (const d of l) { if (d.path === S.selected) return d; const r = find(d.ch || []); if (r) return r; } return null; };
+    const d = find(a.ch);
+    if (d) renderTreeDetail(d);
+    else document.getElementById("treeDetail").innerHTML = `<div class="empty"><div class="big">The folder is gone</div><p>Pick another folder on the left.</p></div>`;
   } else {
-    document.getElementById("agacDetay").innerHTML =
-      `<div class="bos"><div class="bs">Bir klasör seçin</div><p>Seçtiğiniz klasörün açıklamasını, kurallarını ve içindeki dosyaları burada görürsünüz.</p></div>`;
+    document.getElementById("treeDetail").innerHTML =
+      `<div class="empty"><div class="big">Pick a folder</div><p>The folder's description, rules and files appear here.</p></div>`;
   }
 }
 
-function agacDetayCiz(d) {
-  const hedef = document.getElementById("agacDetay");
-  if (!hedef) return;
-  const parcalar = d.yol.split("/");
-  hedef.innerHTML = "";
-  hedef.appendChild(el(`<div style="font-family:var(--f-mono);font-size:11px;color:var(--muted);margin-bottom:9px">
-    ${parcalar.map((p, i) => `${i ? '<span style="opacity:.5"> \\ </span>' : ""}${kacir(p)}`).join("")}</div>`));
-  hedef.appendChild(el(`<h3 style="font-family:var(--f-disp);font-size:26px;font-weight:700;margin:0;letter-spacing:-.01em">${kacir(d.ad)}</h3>`));
-  if (d.d) hedef.appendChild(el(`<p style="margin:9px 0 0;color:var(--text-2);max-width:64ch;font-size:14.5px;line-height:1.55">${kacir(d.d)}</p>`));
-  if (d.not) hedef.appendChild(el(`<div style="margin-top:12px;padding:10px 13px;background:var(--accent-wash);border-left:2px solid var(--accent);border-radius:0 3px 3px 0;font-size:13px;color:var(--text-2);max-width:64ch">${kacir(d.not)}</div>`));
-  const silinen = d.yol.split("/")[0] === SILINENLER;
-  if (silinen) hedef.appendChild(el(`<div class="o-not" style="margin-top:12px;max-width:64ch">Silinen belgeler burada, asıl klasör yapısıyla durur.
-    "Geri yükle" dosyayı eski yerine koyar. "Kalıcı sil" diskten tamamen siler; geri alınamaz.</div>`));
+function renderTreeDetail(d) {
+  const target = document.getElementById("treeDetail");
+  if (!target) return;
+  const parts = d.path.split("/");
+  target.innerHTML = "";
+  target.appendChild(el(`<div style="font-family:var(--f-mono);font-size:11px;color:var(--muted);margin-bottom:9px">
+    ${parts.map((p, i) => `${i ? '<span style="opacity:.5"> \\ </span>' : ""}${esc(p)}`).join("")}</div>`));
+  target.appendChild(el(`<h3 style="font-family:var(--f-disp);font-size:26px;font-weight:700;margin:0;letter-spacing:-.01em">${esc(d.name)}</h3>`));
+  if (d.description) target.appendChild(el(`<p style="margin:9px 0 0;color:var(--text-2);max-width:64ch;font-size:14.5px;line-height:1.55">${esc(d.description)}</p>`));
+  if (d.note) target.appendChild(el(`<div style="margin-top:12px;padding:10px 13px;background:var(--accent-wash);border-left:2px solid var(--accent);border-radius:0 3px 3px 0;font-size:13px;color:var(--text-2);max-width:64ch">${esc(d.note)}</div>`));
+  const deleted = d.path.split("/")[0] === DELETED;
+  if (deleted) target.appendChild(el(`<div class="sugg-note" style="margin-top:12px;max-width:64ch">Deleted documents are kept here in their original folder structure.
+    "Restore" puts the file back where it was. "Delete forever" removes it from disk for good; this cannot be undone.</div>`));
 
-  const yolCubugu = el(`<div class="yol-cubugu"><code>${kacir(d.yol)}</code>
-    <button class="dg ufak" data-kopyala>Kopyala</button>
-    <button class="dg ufak" data-ac>Klasörü aç</button></div>`);
-  hedef.appendChild(yolCubugu);
-  yolCubugu.querySelector("[data-kopyala]").onclick = (ev) => {
-    navigator.clipboard.writeText(d.yol).then(() => { ev.target.textContent = "Kopyalandı"; setTimeout(() => ev.target.textContent = "Kopyala", 1500); });
+  const pathBar = el(`<div class="path-bar"><code>${esc(d.path)}</code>
+    <button class="btn small" data-copy>Copy</button>
+    <button class="btn small" data-open>Open folder</button></div>`);
+  target.appendChild(pathBar);
+  pathBar.querySelector("[data-copy]").onclick = (ev) => {
+    navigator.clipboard.writeText(d.path).then(() => { ev.target.textContent = "Copied"; setTimeout(() => ev.target.textContent = "Copy", 1500); });
   };
-  yolCubugu.querySelector("[data-ac]").onclick = async () => {
-    try { await api("/klasor-ac", { method: "POST", body: JSON.stringify({ yol: d.yol }) }); }
-    catch (e) { hataBildir(e); }
+  pathBar.querySelector("[data-open]").onclick = async () => {
+    try { await api("/open-folder", { method: "POST", body: JSON.stringify({ path: d.path }) }); }
+    catch (e) { toastError(e); }
   };
 
-  hedef.appendChild(el(`<div style="display:flex;align-items:center;gap:11px;margin:22px 0 10px">
-    <h4 style="font-family:var(--f-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:600">Bu klasördeki dosyalar</h4>
+  target.appendChild(el(`<div style="display:flex;align-items:center;gap:11px;margin:22px 0 10px">
+    <h4 style="font-family:var(--f-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:600">Files in this folder</h4>
     <div style="flex:1;height:1px;background:var(--line)"></div>
-    <span style="font-family:var(--f-mono);font-size:10px;color:var(--accent);font-weight:600">${String(d.dosyaSayisi).padStart(2, "0")}</span></div>`));
+    <span style="font-family:var(--f-mono);font-size:10px;color:var(--accent);font-weight:600">${String(d.fileCount).padStart(2, "0")}</span></div>`));
 
-  if (!d.dosyalar.length) {
-    hedef.appendChild(el(`<div style="padding:14px 0;color:var(--muted);font-size:13.5px">Bu klasör henüz boş.${d.ch.length ? ` ${d.ch.length} alt klasörü var.` : ""}</div>`));
+  if (!d.files.length) {
+    target.appendChild(el(`<div style="padding:14px 0;color:var(--muted);font-size:13.5px">This folder is empty.${d.ch.length ? ` It has ${plural(d.ch.length, "subfolder")}.` : ""}</div>`));
   } else {
-    const kutu = el(`<div style="border:1px solid var(--line);border-radius:3px;overflow:hidden"></div>`);
-    for (const f of d.dosyalar) {
-      const uz = (f.ad.split(".").pop() || "").slice(0, 4);
-      const sat = el(`<div class="dosya-sat"><span class="uz">${kacir(uz)}</span>
-        <span class="nm" title="${kacir(f.ad)}">${kacir(f.ad)}</span>
-        <span class="mt">${boyutMetni(f.boyut)} · ${new Date(f.tarih).toLocaleDateString("tr-TR")}</span>
-        ${silinen
-          ? `<button class="dg ufak" data-geri>Geri yükle</button><button class="dg ufak tehlike" data-kalici>Kalıcı sil</button>`
-          : `<button class="dg ufak tehlike" data-sil title="Silinenler klasörüne taşır">Sil</button>`}</div>`);
-      sat.querySelector("[data-sil]")?.addEventListener("click", () => belgeIslem("sil", d, f.ad));
-      sat.querySelector("[data-geri]")?.addEventListener("click", () => belgeIslem("geri", d, f.ad));
-      sat.querySelector("[data-kalici]")?.addEventListener("click", () => belgeIslem("kalici-sil", d, f.ad));
-      kutu.appendChild(sat);
+    const box = el(`<div style="border:1px solid var(--line);border-radius:3px;overflow:hidden"></div>`);
+    for (const f of d.files) {
+      const ext = (f.name.split(".").pop() || "").slice(0, 4);
+      const row = el(`<div class="file-row"><span class="ext">${esc(ext)}</span>
+        <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+        <span class="meta">${sizeText(f.size)} · ${new Date(f.date).toLocaleDateString("en-GB")}</span>
+        ${deleted
+          ? `<button class="btn small" data-restore>Restore</button><button class="btn small danger" data-purge>Delete forever</button>`
+          : `<button class="btn small danger" data-delete title="Moves it to the _Deleted folder">Delete</button>`}</div>`);
+      row.querySelector("[data-delete]")?.addEventListener("click", () => documentAction("delete", d, f.name));
+      row.querySelector("[data-restore]")?.addEventListener("click", () => documentAction("restore", d, f.name));
+      row.querySelector("[data-purge]")?.addEventListener("click", () => documentAction("purge", d, f.name));
+      box.appendChild(row);
     }
-    hedef.appendChild(kutu);
+    target.appendChild(box);
   }
 }
 
-const SILINENLER = "_Silinenler";
+const DELETED = "_Deleted";
 
-/** Klasör ağacında dosya silme (Silinenler'e taşıma), geri yükleme ve kalıcı silme. */
-async function belgeIslem(is, d, ad) {
-  const metin = {
-    sil: ["Belge silinsin mi?", `"${ad}" Silinenler klasörüne taşınır ve Belge Defteri'ne "silindi" notu düşülür. Gerekirse oradan geri yükleyebilirsiniz.`, "Sil"],
-    geri: ["Belge geri yüklensin mi?", `"${ad}" eski yerine, ${d.yol.split("/").slice(1).join(" \ ") || "belge köküne"} klasörüne geri konur.`, "Geri yükle"],
-    "kalici-sil": ["Kalıcı olarak silinsin mi?", `"${ad}" diskten tamamen silinir. Bu işlem geri alınamaz.`, "Kalıcı sil"],
-  }[is];
-  if (!(await onay(...metin))) return;
+/** Deleting a file in the folder tree (moving it to _Deleted), restoring it and deleting it for good. */
+async function documentAction(action, d, name) {
+  const text = {
+    delete: ["Delete this document?", `"${name}" is moved to the _Deleted folder and the Document Register gets a "deleted" note. You can restore it from there if needed.`, "Delete"],
+    restore: ["Restore this document?", `"${name}" goes back to its old place, the ${d.path.split("/").slice(1).join(" \\ ") || "document root"} folder.`, "Restore"],
+    purge: ["Delete for good?", `"${name}" is removed from disk completely. This cannot be undone.`, "Delete forever"],
+  }[action];
+  if (!(await confirmBox(...text))) return;
   try {
-    const r = await api(`/belge/${is}`, { method: "POST", body: JSON.stringify({ klasor: d.yol, ad }) });
-    bildir({ sil: "Belge silindi", geri: "Belge geri yüklendi", "kalici-sil": "Belge kalıcı silindi" }[is],
-      is === "sil" ? "Silinenler klasörüne taşındı." : is === "geri" ? r.yol : "", "iyi");
-    S.agac = await api("/agac");
-    await durumYukle(); gezintiCiz();
-    agacGovdeCiz();
-  } catch (e) { hataBildir(e); }
+    const r = await api(`/document/${action}`, { method: "POST", body: JSON.stringify({ folder: d.path, name }) });
+    toast({ delete: "Document deleted", restore: "Document restored", purge: "Document deleted for good" }[action],
+      action === "delete" ? "Moved to the _Deleted folder." : action === "restore" ? r.path : "", "good");
+    S.tree = await api("/tree");
+    await loadStatus(); renderNav();
+    renderTreeBody();
+  } catch (e) { toastError(e); }
 }
 
-/* ---------------- BELGE YÜKLE ---------------- */
+/* ---------------- UPLOAD DOCUMENTS ---------------- */
 
-async function yukleCiz() {
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas">
-    <div><h2>Belge Yükle</h2><p>Dosyaları bırakın; sistem hangi klasöre ait olduklarını bulup önersin. Onaylayana kadar hiçbir şey taşınmaz.</p></div>
+async function renderUpload() {
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head">
+    <div><h2>Upload Documents</h2><p>Drop your files and the system suggests which folder each one belongs in. Nothing is moved until you confirm.</p></div>
   </div>`));
 
-  const modAd = { karma: "Kural + yapay zekâ", sadeceAi: "Sadece yapay zekâ", sadeceKural: "Sadece kural" }[S.durum.aiModu];
-  const uyari = !S.durum.apiAnahtariVar && S.durum.aiModu !== "sadeceKural"
-    ? `<div class="o-not" style="margin-bottom:12px">API anahtarı girilmediği için yapay zekâ katmanı çalışmıyor; sadece dosya adı kuralları uygulanıyor.
-       <a href="#ayarlar">Ayarlar</a> ekranından anahtarı girebilirsiniz.</div>` : "";
-  if (uyari) ana.appendChild(el(uyari));
+  const modeName = { hybrid: "Rules + AI", aiOnly: "AI only", rulesOnly: "Rules only" }[S.status.aiMode];
+  const warning = !S.status.apiKeySet && S.status.aiMode !== "rulesOnly"
+    ? `<div class="sugg-note" style="margin-bottom:12px">No API key is set, so the AI layer is off; only the file-name rules are applied.
+       You can enter the key on the <a href="#settings">Settings</a> page.</div>` : "";
+  if (warning) main.appendChild(el(warning));
 
-  const birak = el(`<button class="birak" id="birakAlani">
-    <div class="ikon">↓</div>
-    <div class="bs">Dosyayı sürükle bırak</div>
-    <div class="ac">ya da tıklayıp bilgisayarınızdan seçin — aynı anda 30 dosyaya kadar</div>
-    <div class="tur">Aktif mod: ${kacir(modAd)} · PDF ve görseller içeriğinden okunur</div>
+  const drop = el(`<button class="drop" id="dropArea">
+    <div class="icon">↓</div>
+    <div class="big">Drag and drop files</div>
+    <div class="desc">or click to pick them from your computer — up to 30 files at once</div>
+    <div class="types">Mode: ${esc(modeName)} · PDFs and images are read by their content</div>
   </button>`);
-  ana.appendChild(birak);
+  main.appendChild(drop);
 
-  const girdi = el(`<input type="file" multiple hidden>`);
-  ana.appendChild(girdi);
-  const sonucAlani = el(`<div id="sonucAlani"></div>`);
-  ana.appendChild(sonucAlani);
+  const input = el(`<input type="file" multiple hidden>`);
+  main.appendChild(input);
+  const resultArea = el(`<div id="resultArea"></div>`);
+  main.appendChild(resultArea);
 
-  birak.onclick = () => girdi.click();
-  girdi.onchange = () => { if (girdi.files.length) dosyaGonder([...girdi.files]); girdi.value = ""; };
-  for (const olay of ["dragenter", "dragover"]) birak.addEventListener(olay, (e) => { e.preventDefault(); birak.classList.add("uzerinde"); });
-  for (const olay of ["dragleave", "drop"]) birak.addEventListener(olay, (e) => { e.preventDefault(); birak.classList.remove("uzerinde"); });
-  birak.addEventListener("drop", (e) => { const f = [...(e.dataTransfer?.files || [])]; if (f.length) dosyaGonder(f); });
+  drop.onclick = () => input.click();
+  input.onchange = () => { if (input.files.length) sendFiles([...input.files]); input.value = ""; };
+  for (const evName of ["dragenter", "dragover"]) drop.addEventListener(evName, (e) => { e.preventDefault(); drop.classList.add("over"); });
+  for (const evName of ["dragleave", "drop"]) drop.addEventListener(evName, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+  drop.addEventListener("drop", (e) => { const f = [...(e.dataTransfer?.files || [])]; if (f.length) sendFiles(f); });
 
-  if (!S.hedefler.length) { try { S.hedefler = await api("/hedefler"); } catch { /* yoksay */ } }
+  if (!S.targets.length) { try { S.targets = await api("/targets"); } catch { /* ignore */ } }
 }
 
-async function dosyaGonder(dosyalar) {
-  const alan = document.getElementById("sonucAlani");
-  const bekle = el(`<div class="kart" style="margin-top:14px"><div class="kart-govde" style="display:flex;gap:11px;align-items:center">
-    <span class="yukleniyor"></span><span>${dosyalar.length} dosya inceleniyor… PDF içerikleri okunduğu için birkaç saniye sürebilir.</span></div></div>`);
-  alan.prepend(bekle);
+async function sendFiles(files) {
+  const area = document.getElementById("resultArea");
+  const wait = el(`<div class="card" style="margin-top:14px"><div class="card-body" style="display:flex;gap:11px;align-items:center">
+    <span class="spinner"></span><span>Examining ${plural(files.length, "file")}… PDF contents are read, so this can take a few seconds.</span></div></div>`);
+  area.prepend(wait);
 
   const fd = new FormData();
-  for (const f of dosyalar) fd.append("dosyalar", f);
+  for (const f of files) fd.append("files", f);
   try {
-    const { sonuclar } = await api("/yukle", { method: "POST", body: fd });
-    bekle.remove();
-    if (!S.hedefler.length) S.hedefler = await api("/hedefler");
-    for (const s of sonuclar.reverse()) alan.prepend(oneriKarti(s));
-  } catch (e) { bekle.remove(); hataBildir(e); }
+    const { results } = await api("/upload", { method: "POST", body: fd });
+    wait.remove();
+    if (!S.targets.length) S.targets = await api("/targets");
+    for (const s of results.reverse()) area.prepend(suggestionCard(s));
+  } catch (e) { wait.remove(); toastError(e); }
 }
 
-function hedefSecenekleri(secili) {
-  const gruplar = new Map();
-  for (const h of S.hedefler) {
-    const ust = h.yol.split("/")[0];
-    if (!gruplar.has(ust)) gruplar.set(ust, []);
-    gruplar.get(ust).push(h);
+function targetOptions(selected) {
+  const groups = new Map();
+  for (const h of S.targets) {
+    const top = h.path.split("/")[0];
+    if (!groups.has(top)) groups.set(top, []);
+    groups.get(top).push(h);
   }
-  let out = `<option value="">— klasör seçin —</option>`;
-  for (const [ust, liste] of gruplar) {
-    out += `<optgroup label="${kacir(ust)}">`;
-    for (const h of liste) {
-      const etiket = h.yol.split("/").slice(1).join(" / ") || h.yol;
-      out += `<option value="${kacir(h.yol)}" ${h.yol === secili ? "selected" : ""}>${kacir(etiket)}</option>`;
+  let out = `<option value="">— pick a folder —</option>`;
+  for (const [top, list] of groups) {
+    out += `<optgroup label="${esc(top)}">`;
+    for (const h of list) {
+      const label = h.path.split("/").slice(1).join(" / ") || h.path;
+      out += `<option value="${esc(h.path)}" ${h.path === selected ? "selected" : ""}>${esc(label)}</option>`;
     }
     out += `</optgroup>`;
   }
   return out;
 }
 
-function oneriKarti(s) {
-  if (s.hata) {
-    return el(`<div class="oneri" style="margin-top:14px"><div class="o-bas">
-      <span class="dn">${kacir(s.dosyaAdi)}</span><span class="rozet yok">hata</span></div>
-      <div class="o-govde"><div class="o-not">${kacir(s.hata)}</div></div></div>`);
+function suggestionCard(s) {
+  if (s.error) {
+    return el(`<div class="sugg" style="margin-top:14px"><div class="sugg-head">
+      <span class="sname">${esc(s.fileName)}</span><span class="tag none">error</span></div>
+      <div class="sugg-body"><div class="sugg-note">${esc(s.error)}</div></div></div>`);
   }
 
-  const yzd = Math.round((s.guven || 0) * 100);
-  const sinif = yzd >= 70 ? "" : yzd >= 45 ? "dusuk" : "cok-dusuk";
-  const rozet = s.yontem === "claude" ? `<span class="rozet ai">yapay zekâ</span>`
-    : s.yontem === "kural" ? `<span class="rozet kural">kural</span>`
-    : `<span class="rozet yok">bulunamadı</span>`;
+  const pct = Math.round((s.confidence || 0) * 100);
+  const cls = pct >= 70 ? "" : pct >= 45 ? "low" : "very-low";
+  const tag = s.method === "claude" ? `<span class="tag ai">AI</span>`
+    : s.method === "rules" ? `<span class="tag rules">rules</span>`
+    : `<span class="tag none">not found</span>`;
 
-  const k = el(`<div class="oneri" style="margin-top:14px" data-fis="${kacir(s.fis)}">
-    <div class="o-bas">
-      <span class="dn">${kacir(s.dosyaAdi)}</span>
-      <span style="font-family:var(--f-mono);font-size:11px;color:var(--muted)">${boyutMetni(s.boyut || 0)}</span>
-      ${rozet}
-      <span class="guven"><span class="cubuk"><i class="${sinif}" style="width:${yzd}%"></i></span><span class="yzd">%${yzd}</span></span>
+  const k = el(`<div class="sugg" style="margin-top:14px" data-ticket="${esc(s.ticket)}">
+    <div class="sugg-head">
+      <span class="sname">${esc(s.fileName)}</span>
+      <span style="font-family:var(--f-mono);font-size:11px;color:var(--muted)">${sizeText(s.size || 0)}</span>
+      ${tag}
+      <span class="conf"><span class="bar"><i class="${cls}" style="width:${pct}%"></i></span><span class="pct">${pct}%</span></span>
     </div>
-    <div class="o-govde">
-      ${s.gerekce ? `<div class="o-gerekce">${kacir(s.gerekce)}</div>` : ""}
-      ${(s.notlar || []).map((n) => `<div class="o-not">${kacir(n)}</div>`).join("")}
-      <div class="ikili">
-        <div class="alan"><label>Hedef klasör</label>
-          <select data-hedef>${hedefSecenekleri(s.hedefYol)}</select></div>
-        <div class="alan"><label>Kaydedilecek dosya adı</label>
-          <input class="mono" data-ad value="${kacir(s.onerilenAd || s.dosyaAdi)}"></div>
+    <div class="sugg-body">
+      ${s.reason ? `<div class="sugg-reason">${esc(s.reason)}</div>` : ""}
+      ${(s.notes || []).map((n) => `<div class="sugg-note">${esc(n)}</div>`).join("")}
+      <div class="pair">
+        <div class="field"><label>Target folder</label>
+          <select data-target>${targetOptions(s.targetPath)}</select></div>
+        <div class="field"><label>File name to save as</label>
+          <input class="mono" data-name value="${esc(s.suggestedName || s.fileName)}"></div>
       </div>
-      <div class="o-arac">
-        <button class="dg bas" data-onayla>Klasöre yerleştir</button>
-        <button class="dg tehlike" data-iptal>Vazgeç</button>
-        ${s.ai?.okundu && s.ai.okundu !== "yok" ? `<span style="font-family:var(--f-mono);font-size:10px;color:var(--muted);align-self:center">
-          belge içeriği okundu (${kacir({ pdf: "PDF", gorsel: "görsel", metin: "metin" }[s.ai.okundu])})</span>` : ""}
+      <div class="sugg-tools">
+        <button class="btn primary" data-place>File it</button>
+        <button class="btn danger" data-cancel>Cancel</button>
+        ${s.ai?.read && s.ai.read !== "none" ? `<span style="font-family:var(--f-mono);font-size:10px;color:var(--muted);align-self:center">
+          document content was read (${esc({ pdf: "PDF", image: "image", text: "text" }[s.ai.read])})</span>` : ""}
       </div>
     </div></div>`);
 
-  const secim = k.querySelector("[data-hedef]");
-  const adGirdi = k.querySelector("[data-ad]");
+  const select = k.querySelector("[data-target]");
+  const nameInput = k.querySelector("[data-name]");
 
-  secim.onchange = async () => {
+  select.onchange = async () => {
     try {
-      const r = await api("/ad-oner", { method: "POST", body: JSON.stringify({ dosyaAdi: s.dosyaAdi, hedefYol: secim.value }) });
-      adGirdi.value = r.ad;
-    } catch { /* önemsiz */ }
+      const r = await api("/suggest-name", { method: "POST", body: JSON.stringify({ fileName: s.fileName, targetPath: select.value }) });
+      nameInput.value = r.name;
+    } catch { /* not important */ }
   };
 
-  k.querySelector("[data-onayla]").onclick = async (ev) => {
-    if (!secim.value) return bildir("Hedef seçilmedi", "Önce bir klasör seçin.", "hata");
+  k.querySelector("[data-place]").onclick = async (ev) => {
+    if (!select.value) return toast("No target picked", "Pick a folder first.", "error");
     ev.target.disabled = true;
     try {
-      const elleMi = secim.value !== s.hedefYol;
-      const r = await api("/yerlestir", {
+      const manual = select.value !== s.targetPath;
+      const r = await api("/place", {
         method: "POST",
         body: JSON.stringify({
-          fis: s.fis, hedefYol: secim.value, dosyaAdi: adGirdi.value,
-          belgeTuru: s.belgeTuru, ilgili: s.ilgili,
-          yontem: elleMi ? "elle" : s.yontem, guven: elleMi ? null : s.guven,
+          ticket: s.ticket, targetPath: select.value, fileName: nameInput.value,
+          docType: s.docType, related: s.related,
+          method: manual ? "manual" : s.method, confidence: manual ? null : s.confidence,
         }),
       });
-      k.replaceWith(el(`<div class="oneri" style="margin-top:14px"><div class="o-bas">
-        <span class="dn">${kacir(r.yerlesen.ad)}</span><span class="rozet kural" style="background:var(--iyi);color:#fff">yerleştirildi</span></div>
-        <div class="o-govde"><div class="o-gerekce" style="font-family:var(--f-mono);font-size:12px">${kacir(r.yerlesen.yol)}</div></div></div>`));
-      bildir("Belge yerleştirildi", r.yerlesen.yol, "iyi");
-      S.agac = null;
-      await durumYukle(); gezintiCiz();
-    } catch (e) { hataBildir(e); ev.target.disabled = false; }
+      k.replaceWith(el(`<div class="sugg" style="margin-top:14px"><div class="sugg-head">
+        <span class="sname">${esc(r.placed.name)}</span><span class="tag rules" style="background:var(--good);color:#fff">filed</span></div>
+        <div class="sugg-body"><div class="sugg-reason" style="font-family:var(--f-mono);font-size:12px">${esc(r.placed.path)}</div></div></div>`));
+      toast("Document filed", r.placed.path, "good");
+      S.tree = null;
+      await loadStatus(); renderNav();
+    } catch (e) { toastError(e); ev.target.disabled = false; }
   };
 
-  k.querySelector("[data-iptal]").onclick = async () => {
-    try { await api("/iptal", { method: "POST", body: JSON.stringify({ fis: s.fis }) }); } catch { /* yoksay */ }
+  k.querySelector("[data-cancel]").onclick = async () => {
+    try { await api("/cancel", { method: "POST", body: JSON.stringify({ ticket: s.ticket }) }); } catch { /* ignore */ }
     k.remove();
   };
   return k;
 }
 
-/* ---------------- TABLOLAR ---------------- */
+/* ---------------- TABLES ---------------- */
 
-const tabloDurum = {};
+const tableState = {};
 
-async function tabloCiz(tabloAdi) {
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  let veri;
-  try { veri = await api(`/tablo/${tabloAdi}`); } catch (e) { hataBildir(e); return; }
-  const { tanim, satirlar } = veri;
-  tabloDurum[tabloAdi] = { tanim, satirlar, filtre: tabloDurum[tabloAdi]?.filtre || "" };
+async function renderTable(tableName) {
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  let data;
+  try { data = await api(`/table/${tableName}`); } catch (e) { toastError(e); return; }
+  const { def, rows } = data;
+  tableState[tableName] = { def, rows, filter: tableState[tableName]?.filter || "" };
 
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas">
-    <div><h2>${kacir(tanim.ad)}</h2><p>${kacir(tanim.aciklama)}</p></div>
-    <div class="bas-arac">
-      <button class="dg" data-is="excel-in">Excel'e aktar</button>
-      ${tanim.saltOkunur ? "" : `<button class="dg" data-is="excel-yuk">Excel'den yükle</button>
-      <button class="dg bas" data-is="ekle">+ Yeni ${kacir(tanim.tekil)}</button>`}
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head">
+    <div><h2>${esc(def.name)}</h2><p>${esc(def.description)}</p></div>
+    <div class="head-tools">
+      <button class="btn" data-do="excel-out">Export to Excel</button>
+      ${def.readOnly ? "" : `<button class="btn" data-do="excel-in">Import from Excel</button>
+      <button class="btn primary" data-do="add">+ New ${esc(def.singular)}</button>`}
     </div></div>`));
 
-  const arac = el(`<div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
-    <div class="ara-kutu"><input placeholder="Tabloda ara…" value="${kacir(tabloDurum[tabloAdi].filtre)}"></div>
-    <span id="satirSayi" style="font-family:var(--f-mono);font-size:11px;color:var(--muted)"></span>
-    ${tanim.saltOkunur ? "" : `<span style="font-family:var(--f-mono);font-size:10.5px;color:var(--muted);margin-left:auto">
-      Hücreyi düzenleyip başka yere tıklayın — kayıt anında saklanır.</span>`}
+  const tools = el(`<div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+    <div class="search"><input placeholder="Search the table…" value="${esc(tableState[tableName].filter)}"></div>
+    <span id="rowCount" style="font-family:var(--f-mono);font-size:11px;color:var(--muted)"></span>
+    ${def.readOnly ? "" : `<span style="font-family:var(--f-mono);font-size:10.5px;color:var(--muted);margin-left:auto">
+      Edit a cell and click elsewhere — the record is saved at once.</span>`}
   </div>`);
-  ana.appendChild(arac);
+  main.appendChild(tools);
 
-  const sar = el(`<div class="tablo-sar"><table class="gr"><thead></thead><tbody></tbody></table></div>`);
-  ana.appendChild(sar);
+  const wrap = el(`<div class="table-wrap"><table class="grid"><thead></thead><tbody></tbody></table></div>`);
+  main.appendChild(wrap);
 
-  const excelGirdi = el(`<input type="file" accept=".xlsx" hidden>`);
-  ana.appendChild(excelGirdi);
+  const excelInput = el(`<input type="file" accept=".xlsx" hidden>`);
+  main.appendChild(excelInput);
 
-  ana.querySelector('[data-is="excel-in"]').onclick = () => { location.href = `/api/tablo/${tabloAdi}/excel`; };
-  if (!tanim.saltOkunur) {
-    ana.querySelector('[data-is="excel-yuk"]').onclick = () => excelGirdi.click();
-    ana.querySelector('[data-is="ekle"]').onclick = () => {
-      tabloDurum[tabloAdi].satirlar.unshift({ _id: null, _yeni: true });
-      gridCiz(tabloAdi);
-      sar.querySelector("tbody tr input:not([disabled])")?.focus();
+  main.querySelector('[data-do="excel-out"]').onclick = () => { location.href = `/api/table/${tableName}/excel`; };
+  if (!def.readOnly) {
+    main.querySelector('[data-do="excel-in"]').onclick = () => excelInput.click();
+    main.querySelector('[data-do="add"]').onclick = () => {
+      tableState[tableName].rows.unshift({ _id: null, _new: true });
+      renderGrid(tableName);
+      wrap.querySelector("tbody tr input:not([disabled])")?.focus();
     };
-    excelGirdi.onchange = async () => {
-      if (!excelGirdi.files[0]) return;
-      const fd = new FormData(); fd.append("dosya", excelGirdi.files[0]);
+    excelInput.onchange = async () => {
+      if (!excelInput.files[0]) return;
+      const fd = new FormData(); fd.append("file", excelInput.files[0]);
       try {
-        const r = await api(`/tablo/${tabloAdi}/excel`, { method: "POST", body: fd });
-        bildir("Excel içe aktarıldı",
-          `${r.eklenen} yeni, ${r.guncellenen} güncellendi${r.atlanan.length ? `, ${r.atlanan.length} satır atlandı` : ""}.`, "iyi");
-        if (r.atlanan.length) console.warn("Atlanan satırlar:", r.atlanan);
-        await durumYukle(); gezintiCiz(); tabloCiz(tabloAdi);
-      } catch (e) { hataBildir(e); }
-      excelGirdi.value = "";
+        const r = await api(`/table/${tableName}/excel`, { method: "POST", body: fd });
+        toast("Excel imported",
+          `${r.added} new, ${r.updated} updated${r.skipped.length ? `, ${plural(r.skipped.length, "row")} skipped` : ""}.`, "good");
+        if (r.skipped.length) console.warn("Skipped rows:", r.skipped);
+        await loadStatus(); renderNav(); renderTable(tableName);
+      } catch (e) { toastError(e); }
+      excelInput.value = "";
     };
   }
 
-  arac.querySelector("input").oninput = (ev) => { tabloDurum[tabloAdi].filtre = ev.target.value; gridCiz(tabloAdi); };
-  gridCiz(tabloAdi);
+  tools.querySelector("input").oninput = (ev) => { tableState[tableName].filter = ev.target.value; renderGrid(tableName); };
+  renderGrid(tableName);
 }
 
-function gridCiz(tabloAdi) {
-  const { tanim, satirlar, filtre } = tabloDurum[tabloAdi];
-  const tablo = ana.querySelector("table.gr");
-  const bas = tablo.querySelector("thead");
-  const govde = tablo.querySelector("tbody");
+function renderGrid(tableName) {
+  const { def, rows, filter } = tableState[tableName];
+  const table = main.querySelector("table.grid");
+  const head = table.querySelector("thead");
+  const body = table.querySelector("tbody");
 
-  bas.innerHTML = `<tr>${tanim.detay ? `<th class="detay-s"></th>` : ""}${tanim.kolon.map((k) => `<th style="min-width:${k.gen}px">${kacir(k.b)}</th>`).join("")}${tanim.saltOkunur ? "" : `<th class="sil-s"></th>`}</tr>`;
+  head.innerHTML = `<tr>${def.detail ? `<th class="detail-col"></th>` : ""}${def.columns.map((c) => `<th style="min-width:${c.width}px">${esc(c.label)}</th>`).join("")}${def.readOnly ? "" : `<th class="del-col"></th>`}</tr>`;
 
-  const q = filtre.trim().toLocaleLowerCase("tr");
-  const gorunen = q
-    ? satirlar.filter((s) => s._yeni || tanim.kolon.some((k) => String(s[k.k] || "").toLocaleLowerCase("tr").includes(q)))
-    : satirlar;
-  ana.querySelector("#satirSayi").textContent = `${gorunen.length} / ${satirlar.length} kayıt`;
+  const q = filter.trim().toLocaleLowerCase("tr");
+  const visible = q
+    ? rows.filter((s) => s._new || def.columns.some((c) => String(s[c.key] || "").toLocaleLowerCase("tr").includes(q)))
+    : rows;
+  main.querySelector("#rowCount").textContent = `${visible.length} / ${plural(rows.length, "record")}`;
 
-  govde.innerHTML = "";
-  if (!gorunen.length) {
-    govde.innerHTML = `<tr><td colspan="${tanim.kolon.length + 2}"><div class="bos">
-      <div class="bs">${q ? "Eşleşen kayıt yok" : "Henüz kayıt yok"}</div>
-      <p>${q ? "Aramayı değiştirip tekrar deneyin." : tanim.saltOkunur ? "Belge yükledikçe bu defter kendiliğinden dolar." : `Sağ üstteki "+ Yeni ${kacir(tanim.tekil)}" ile ilk kaydı ekleyin.`}</p>
+  body.innerHTML = "";
+  if (!visible.length) {
+    body.innerHTML = `<tr><td colspan="${def.columns.length + 2}"><div class="empty">
+      <div class="big">${q ? "No matching records" : "No records yet"}</div>
+      <p>${q ? "Change the search and try again." : def.readOnly ? "This register fills itself as documents are uploaded." : `Add the first record with "+ New ${esc(def.singular)}" at the top right.`}</p>
     </div></td></tr>`;
     return;
   }
 
-  for (const satir of gorunen) {
+  for (const row of visible) {
     const tr = document.createElement("tr");
-    if (satir._yeni) tr.className = "yeni";
-    if (satir.kaynak && satir.kaynak !== "Elle") tr.classList.add("oto");
-    tr.dataset.id = satir._id || "";
+    if (row._new) tr.className = "new";
+    if (row.source && row.source !== "Manual") tr.classList.add("auto");
+    tr.dataset.id = row._id || "";
 
-    if (tanim.detay) {
+    if (def.detail) {
       const td = document.createElement("td");
-      td.className = "detay-h";
-      td.innerHTML = satir._id ? `<a href="#d/${tabloAdi}/${satir._id}" title="Ayrıntı sayfası">↗</a>` : "";
+      td.className = "detail-cell";
+      td.innerHTML = row._id ? `<a href="#d/${tableName}/${row._id}" title="Detail page">↗</a>` : "";
       tr.appendChild(td);
     }
 
-    for (const k of tanim.kolon) {
+    for (const c of def.columns) {
       const td = document.createElement("td");
-      const deger = satir[k.k] ?? "";
-      if (k.tur === "salt") {
-        td.className = `salt ${k.k === "kod" ? "kod" : ""} ${k.hesap ? "hesap" : ""}`;
-        if (k.pul && deger) td.innerHTML = pulHtml(deger, satir);
-        else td.textContent = deger || (satir._yeni && k.k === "kod" ? "otomatik" : "—");
-      } else if (k.tur === "secim") {
-        td.innerHTML = `<select data-k="${k.k}"><option value=""></option>${k.secenek.map((o) =>
-          `<option ${o === deger ? "selected" : ""}>${kacir(o)}</option>`).join("")}</select>`;
-      } else if (k.tur === "baglanti") {
-        td.innerHTML = `<select data-k="${k.k}">${baglantiSecenekleri(k.kaynak, deger)}</select>`;
+      const value = row[c.key] ?? "";
+      if (c.type === "readonly") {
+        td.className = `ro ${c.key === "code" ? "code" : ""} ${c.computed ? "calc" : ""}`;
+        if (c.badge && value) td.innerHTML = badgeHtml(value, row);
+        else td.textContent = value || (row._new && c.key === "code" ? "automatic" : "—");
+      } else if (c.type === "select") {
+        td.innerHTML = `<select data-k="${c.key}"><option value=""></option>${c.options.map((o) =>
+          `<option ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+      } else if (c.type === "link") {
+        td.innerHTML = `<select data-k="${c.key}">${linkOptions(c.source, value)}</select>`;
       } else {
-        const tip = k.tur === "tarih" ? "date" : (k.tur === "sayi" || k.tur === "para") ? "number" : "text";
-        td.innerHTML = `<input type="${tip}" data-k="${k.k}" value="${kacir(deger)}" ${k.tur === "para" ? 'step="0.01"' : ""}>`;
-        if (k.uyari) {
-          const kalan = gunFarki(deger);
-          if (kalan !== null && kalan <= 0) td.classList.add("tehlike");
-          else if (kalan !== null && kalan <= k.uyari) td.classList.add("dikkat");
+        const type = c.type === "date" ? "date" : (c.type === "number" || c.type === "money") ? "number" : "text";
+        td.innerHTML = `<input type="${type}" data-k="${c.key}" value="${esc(value)}" ${c.type === "money" ? 'step="0.01"' : ""}>`;
+        if (c.warnDays) {
+          const left = daysUntil(value);
+          if (left !== null && left <= 0) td.classList.add("danger");
+          else if (left !== null && left <= c.warnDays) td.classList.add("attn");
         }
       }
       tr.appendChild(td);
     }
 
-    if (!tanim.saltOkunur) {
+    if (!def.readOnly) {
       const td = document.createElement("td");
-      td.innerHTML = `<button class="sat-sil" title="Satırı sil">×</button>`;
-      td.querySelector("button").onclick = () => satirSil(tabloAdi, satir, tr);
+      td.innerHTML = `<button class="row-del" title="Delete row">×</button>`;
+      td.querySelector("button").onclick = () => deleteRow(tableName, row, tr);
       tr.appendChild(td);
     }
-    govde.appendChild(tr);
+    body.appendChild(tr);
   }
 
-  if (tanim.saltOkunur || govde.dataset.bagli) return;
+  if (def.readOnly || body.dataset.bound) return;
 
-  // Dinleyiciler tbody'ye BİR KEZ bağlanır. gridCiz her çağrıldığında yeniden
-  // bağlanırsa aynı satır için kaydetme birden çok kez tetiklenir.
-  govde.dataset.bagli = "1";
-  govde.addEventListener("input", (ev) => {
+  // Listeners are bound to the tbody ONCE. If renderGrid bound them on every call,
+  // saving would fire several times for the same row.
+  body.dataset.bound = "1";
+  body.addEventListener("input", (ev) => {
     const tr = ev.target.closest("tr");
-    if (tr) tr.classList.add("kirli");
+    if (tr) tr.classList.add("dirty");
   });
-  govde.addEventListener("focusout", (ev) => {
+  body.addEventListener("focusout", (ev) => {
     const tr = ev.target.closest("tr");
-    if (!tr || !tr.classList.contains("kirli")) return;
-    // Odak hâlâ aynı satırdaysa kaydetme.
-    setTimeout(() => { if (!tr.contains(document.activeElement)) satirKaydet(tabloAdi, tr); }, 0);
+    if (!tr || !tr.classList.contains("dirty")) return;
+    // Don't save while focus is still in the same row.
+    setTimeout(() => { if (!tr.contains(document.activeElement)) saveRow(tableName, tr); }, 0);
   });
 }
 
-/** Durum sütunu (ör. kasa: Otomatik / Elle düzeltildi) renkli etiket olarak çizilir. */
-function pulHtml(deger, satir) {
-  const geri = deger === "Elle düzeltildi";
-  const ipucu = geri ? `Sistemin hesabı: ${satir.sistemTutar || "—"}. Tıklayınca sistemin hesabına geri döner.` : "";
-  const sinif = { "Otomatik": "otomatik", "Elle düzeltildi": "duzeltildi geri", "Elle girildi": "elle" }[deger] || "";
-  return `<span class="pul-d ${sinif}"
-    ${geri ? `data-geri="${kacir(satir._id)}" title="${kacir(ipucu)}"` : ""}>${kacir(deger)}</span>`;
+/** A status column (e.g. cash: Automatic / Corrected by hand) is drawn as a coloured label. */
+function badgeHtml(value, row) {
+  const revert = value === "Corrected by hand";
+  const hint = revert ? `The system's figure: ${row.systemAmount || "—"}. Click to go back to the system's figure.` : "";
+  const cls = { "Automatic": "auto", "Corrected by hand": "edited revert", "Entered by hand": "manual" }[value] || "";
+  return `<span class="spill ${cls}"
+    ${revert ? `data-revert="${esc(row._id)}" title="${esc(hint)}"` : ""}>${esc(value)}</span>`;
 }
 
-/** Kaydedilen satırın salt-okunur hücrelerini yerinde tazeler (odağı bozmadan). */
-function satirTazele(tabloAdi, tr, satir) {
-  const { tanim } = tabloDurum[tabloAdi];
-  const kayma = tanim.detay ? 1 : 0;
-  if (kayma && satir._id) tr.children[0].innerHTML = `<a href="#d/${tabloAdi}/${satir._id}" title="Ayrıntı sayfası">↗</a>`;
-  tanim.kolon.forEach((k, i) => {
-    const td = tr.children[i + kayma];
+/** Refreshes the read-only cells of a saved row in place (without losing focus). */
+function refreshRow(tableName, tr, row) {
+  const { def } = tableState[tableName];
+  const shift = def.detail ? 1 : 0;
+  if (shift && row._id) tr.children[0].innerHTML = `<a href="#d/${tableName}/${row._id}" title="Detail page">↗</a>`;
+  def.columns.forEach((c, i) => {
+    const td = tr.children[i + shift];
     if (!td) return;
-    if (k.tur === "salt") {
-      if (k.pul && satir[k.k]) td.innerHTML = pulHtml(satir[k.k], satir); else td.textContent = satir[k.k] || "—";
+    if (c.type === "readonly") {
+      if (c.badge && row[c.key]) td.innerHTML = badgeHtml(row[c.key], row); else td.textContent = row[c.key] || "—";
     }
-    if (k.uyari) {
-      const kalan = gunFarki(satir[k.k]);
-      td.classList.toggle("tehlike", kalan !== null && kalan <= 0);
-      td.classList.toggle("dikkat", kalan !== null && kalan > 0 && kalan <= k.uyari);
+    if (c.warnDays) {
+      const left = daysUntil(row[c.key]);
+      td.classList.toggle("danger", left !== null && left <= 0);
+      td.classList.toggle("attn", left !== null && left > 0 && left <= c.warnDays);
     }
   });
 }
 
-async function satirKaydet(tabloAdi, tr) {
-  const { tanim, satirlar } = tabloDurum[tabloAdi];
+async function saveRow(tableName, tr) {
+  const { def, rows } = tableState[tableName];
   const id = tr.dataset.id;
-  const satir = id ? satirlar.find((s) => s._id === id) : satirlar.find((s) => s._yeni);
-  if (!satir) return;
+  const row = id ? rows.find((s) => s._id === id) : rows.find((s) => s._new);
+  if (!row) return;
 
-  const gelen = {};
-  for (const alan of tr.querySelectorAll("[data-k]")) gelen[alan.dataset.k] = alan.value;
+  const fields = {};
+  for (const f of tr.querySelectorAll("[data-k]")) fields[f.dataset.k] = f.value;
 
-  const eksik = tanim.kolon.find((k) => k.zorunlu && !String(gelen[k.k] || "").trim());
-  if (eksik) {
-    if (satir._yeni && Object.values(gelen).every((v) => !String(v).trim())) return; // boş yeni satır: sessizce bırak
-    tr.classList.remove("kirli");
-    return bildir("Eksik alan", `"${eksik.b}" doldurulmadan kaydedilemez.`, "hata");
+  const missing = def.columns.find((c) => c.required && !String(fields[c.key] || "").trim());
+  if (missing) {
+    if (row._new && Object.values(fields).every((v) => !String(v).trim())) return; // empty new row: leave it quietly
+    tr.classList.remove("dirty");
+    return toast("Missing field", `"${missing.label}" must be filled in before saving.`, "error");
   }
 
   try {
-    const y = satir._yeni
-      ? await api(`/tablo/${tabloAdi}`, { method: "POST", body: JSON.stringify(gelen) })
-      : await api(`/tablo/${tabloAdi}/${id}`, { method: "PUT", body: JSON.stringify(gelen) });
+    const y = row._new
+      ? await api(`/table/${tableName}`, { method: "POST", body: JSON.stringify(fields) })
+      : await api(`/table/${tableName}/${id}`, { method: "PUT", body: JSON.stringify(fields) });
 
-    Object.assign(satir, y.satir);
-    delete satir._yeni;
-    tr.classList.remove("kirli", "yeni");
-    tr.dataset.id = y.satir._id;
-    // Tabloyu baştan çizmek yerine hücreleri yerinde tazeliyoruz; aksi hâlde
-    // kullanıcı bir sonraki satıra geçerken odağı kaybediyor.
-    satirTazele(tabloAdi, tr, y.satir);
+    Object.assign(row, y.row);
+    delete row._new;
+    tr.classList.remove("dirty", "new");
+    tr.dataset.id = y.row._id;
+    // The cells are refreshed in place instead of redrawing the table; otherwise
+    // the user loses focus while moving to the next row.
+    refreshRow(tableName, tr, y.row);
 
-    if (y.uyari) {
-      bildir("Kaydedildi, ama dikkat", y.uyari, "hata");
-    } else if (y.klasorRaporu?.acilan?.length) {
-      bildir("Kayıt eklendi", `${y.klasorYolu} klasörü ${y.klasorRaporu.acilan.length} alt klasörle açıldı.`, "iyi");
-      S.agac = null;
-    } else if (y.adDegisikligi) {
-      bildir("Klasör yeniden adlandırıldı", `${y.adDegisikligi.eski} → ${y.adDegisikligi.yeni}`, "iyi");
-      S.agac = null;
+    if (y.warning) {
+      toast("Saved, but note", y.warning, "error");
+    } else if (y.folderReport?.created?.length) {
+      toast("Record added", `Folder ${y.folderPath} was created with ${plural(y.folderReport.created.length, "subfolder")}.`, "good");
+      S.tree = null;
+    } else if (y.renamed) {
+      toast("Folder renamed", `${y.renamed.from} → ${y.renamed.to}`, "good");
+      S.tree = null;
     } else {
-      bildir("Kaydedildi", "", "iyi");
+      toast("Saved", "", "good");
     }
-    S.hedefler = [];
-    await durumYukle(); gezintiCiz();
-    tabloDurum[tabloAdi].kaydedilince?.();
+    S.targets = [];
+    await loadStatus(); renderNav();
+    tableState[tableName].onSaved?.();
   } catch (e) {
-    hataBildir(e);
-    tr.classList.add("kirli");
+    toastError(e);
+    tr.classList.add("dirty");
   }
 }
 
-async function satirSil(tabloAdi, satir, tr) {
-  const { tanim, satirlar } = tabloDurum[tabloAdi];
-  if (satir._yeni) {
-    satirlar.splice(satirlar.indexOf(satir), 1);
-    return gridCiz(tabloAdi);
+async function deleteRow(tableName, row, tr) {
+  const { def, rows } = tableState[tableName];
+  if (row._new) {
+    rows.splice(rows.indexOf(row), 1);
+    return renderGrid(tableName);
   }
-  const etiket = satir.ad || satir.plaka || satir.kod || satir.aciklama || satir.demirbas || "bu kayıt";
-  const mesaj = tanim.klasorTuru
-    ? `"${etiket}" tablodan silinecek. Diskteki klasör ve içindeki belgeler SİLİNMEZ, oldukları yerde kalır.`
-    : satir.kaynak && satir.kaynak !== "Elle"
-      ? `"${etiket}" sistemin yazdığı bir satır. Silerseniz sistem bunu bir daha yazmaz (Kasa ekranından geri getirilebilir).`
-      : `"${etiket}" silinecek.`;
-  const ok = await onay("Kayıt silinsin mi?", mesaj, "Sil");
+  const label = row.name || row.plate || row.code || row.description || row.item || "this record";
+  const message = def.folderType
+    ? `"${label}" will be removed from the table. Its folder on disk and the documents in it are NOT deleted; they stay where they are.`
+    : row.source && row.source !== "Manual"
+      ? `"${label}" is a row the system wrote. If you delete it the system won't write it again (it can be brought back from the Cash page).`
+      : `"${label}" will be deleted.`;
+  const ok = await confirmBox("Delete this record?", message, "Delete");
   if (!ok) return;
   try {
-    const y = await api(`/tablo/${tabloAdi}/${satir._id}`, { method: "DELETE" });
-    satirlar.splice(satirlar.indexOf(satir), 1);
+    const y = await api(`/table/${tableName}/${row._id}`, { method: "DELETE" });
+    rows.splice(rows.indexOf(row), 1);
     tr.remove();
-    bildir("Kayıt silindi", y.uyari || "", "iyi");
-    S.hedefler = [];
-    await durumYukle(); gezintiCiz(); gridCiz(tabloAdi);
-    tabloDurum[tabloAdi].kaydedilince?.();
-  } catch (e) { hataBildir(e); }
+    toast("Record deleted", y.warning || "", "good");
+    S.targets = [];
+    await loadStatus(); renderNav(); renderGrid(tableName);
+    tableState[tableName].onSaved?.();
+  } catch (e) { toastError(e); }
 }
 
-/* ---------------- bağlantılar ---------------- */
+/* ---------------- links ---------------- */
 
-/** Bağlantı sütunlarının (ekip, ev, proje, personel, müşteri) seçenek kaynakları. */
-const KAYNAKLAR = ["personel", "musteri", "proje", "ekip", "ev"];
+/** Option sources for the link columns (crew, house, project, employee, client). */
+const SOURCES = ["employees", "clients", "projects", "crews", "houses"];
 
-async function kaynaklariYukle(haric) {
-  await Promise.all(KAYNAKLAR.filter((k) => k !== haric).map(async (k) => {
-    try { const v = await api(`/tablo/${k}`); tabloDurum[k] = { ...v, filtre: tabloDurum[k]?.filtre || "" }; }
-    catch { /* yoksay */ }
+async function loadSources(except) {
+  await Promise.all(SOURCES.filter((k) => k !== except).map(async (k) => {
+    try { const v = await api(`/table/${k}`); tableState[k] = { ...v, filter: tableState[k]?.filter || "" }; }
+    catch { /* ignore */ }
   }));
 }
 
-const kayitlar = (ad) => (tabloDurum[ad]?.satirlar || []).filter((r) => !r._yeni);
-const kayitEtiketi = (r) => (r.kod ? `${r.kod} — ${r.ad}` : r.ad);
+const records = (name) => (tableState[name]?.rows || []).filter((r) => !r._new);
+const recordLabel = (r) => (r.code ? `${r.code} — ${r.name}` : r.name);
 
-function baglantiSecenekleri(kaynakAdi, deger) {
+function linkOptions(sourceName, value) {
   let out = `<option value=""></option>`;
-  let bulundu = false;
-  for (const r of kayitlar(kaynakAdi)) {
-    const v = r.kod || r.ad;
-    if (v === deger) bulundu = true;
-    out += `<option value="${kacir(v)}" ${v === deger ? "selected" : ""}>${kacir(kayitEtiketi(r))}</option>`;
+  let found = false;
+  for (const r of records(sourceName)) {
+    const v = r.code || r.name;
+    if (v === value) found = true;
+    out += `<option value="${esc(v)}" ${v === value ? "selected" : ""}>${esc(recordLabel(r))}</option>`;
   }
-  if (deger && !bulundu) out += `<option value="${kacir(deger)}" selected>${kacir(deger)}</option>`;
+  if (value && !found) out += `<option value="${esc(value)}" selected>${esc(value)}</option>`;
   return out;
 }
 
-/* ---------------- AYRINTI SAYFALARI ---------------- */
+/* ---------------- DETAIL PAGES ---------------- */
 
-const sayiMetni = (n) => Number(n || 0).toLocaleString("tr-TR", { maximumFractionDigits: 2 });
-const toplamMetni = (t) => {
+const numText = (n) => Number(n || 0).toLocaleString("en-GB", { maximumFractionDigits: 2 });
+const totalText = (t) => {
   const p = Object.entries(t || {}).filter(([, v]) => v);
-  return p.length ? p.map(([pb, v]) => `${sayiMetni(v)} ${pb}`).join(" · ") : "—";
+  return p.length ? p.map(([cur, v]) => `${numText(v)} ${cur}`).join(" · ") : "—";
 };
-/** Toplamın ana para birimindeki karşılığı (Ayarlar'daki ya da dönemin kuru). */
-function anaTutar(toplam, kur = S.durum?.kur) {
-  const ana = kur?.ana || "EUR";
-  const o = { ...(kur?.oran || {}), [ana]: 1 };
+/** The total in the base currency (at the rates in Settings, or the period's rates). */
+function baseAmount(total, rates = S.status?.rates) {
+  const base = rates?.base || "EUR";
+  const o = { ...(rates?.rate || {}), [base]: 1 };
   let t = 0;
-  const eksik = [];
-  for (const [pb, v] of Object.entries(toplam || {})) { if (!v) continue; if (o[pb]) t += v / o[pb]; else eksik.push(pb); }
-  return { pb: ana, t: Math.round(t * 100) / 100, eksik };
+  const missing = [];
+  for (const [cur, v] of Object.entries(total || {})) { if (!v) continue; if (o[cur]) t += v / o[cur]; else missing.push(cur); }
+  return { cur: base, t: Math.round(t * 100) / 100, missing };
 }
-/** Birden çok para birimi varsa "≈ 1.234 EUR"; tek ve ana para birimiyse boş. */
-function anaKarsilik(toplam, kur = S.durum?.kur) {
-  const dolu = Object.entries(toplam || {}).filter(([, v]) => v);
-  const ana = kur?.ana || "EUR";
-  if (!dolu.length || (dolu.length === 1 && dolu[0][0] === ana)) return "";
-  const a = anaTutar(toplam, kur);
-  return `≈ ${sayiMetni(a.t)} ${a.pb}${a.eksik.length ? ` (${a.eksik.join(", ")} kuru yok)` : ""}`;
+/** "≈ 1,234 EUR" when there are several currencies; empty when there is only the base currency. */
+function baseEquivalent(total, rates = S.status?.rates) {
+  const filled = Object.entries(total || {}).filter(([, v]) => v);
+  const base = rates?.base || "EUR";
+  if (!filled.length || (filled.length === 1 && filled[0][0] === base)) return "";
+  const a = baseAmount(total, rates);
+  return `≈ ${numText(a.t)} ${a.cur}${a.missing.length ? ` (no rate for ${a.missing.join(", ")})` : ""}`;
 }
-/** Özet tablolarına ana para birimi satırı: her sütunun ≈ karşılığı. */
-function anaSatirHtml(kolonlar, kur = S.durum?.kur) {
-  const ana = kur?.ana || "EUR";
-  const pbler = new Set(kolonlar.flatMap((t) => Object.entries(t || {}).filter(([, v]) => v).map(([k]) => k)));
-  if (!pbler.size || (pbler.size === 1 && pbler.has(ana))) return "";
-  return `<tr class="ana-sat" title="Ayarlar'daki kurla ${ana} karşılığı (bilgi amaçlı)"><td class="pb">≈ ${ana}</td>${kolonlar.map((t) => {
-    const a = anaTutar(t, kur);
-    return `<td>${sayiMetni(a.t)}${a.eksik.length ? `<span class="soluk"> + ${a.eksik.join(", ")}</span>` : ""}</td>`;
+/** A base-currency row for summary tables: the ≈ value of every column. */
+function baseRowHtml(columns, rates = S.status?.rates) {
+  const base = rates?.base || "EUR";
+  const curs = new Set(columns.flatMap((t) => Object.entries(t || {}).filter(([, v]) => v).map(([k]) => k)));
+  if (!curs.size || (curs.size === 1 && curs.has(base))) return "";
+  return `<tr class="base-row" title="${base} value at the rates in Settings (for information)"><td class="cur">≈ ${base}</td>${columns.map((t) => {
+    const a = baseAmount(t, rates);
+    return `<td>${numText(a.t)}${a.missing.length ? `<span class="muted"> + ${a.missing.join(", ")}</span>` : ""}</td>`;
   }).join("")}</tr>`;
 }
-const kurEsit = (a, b) => (a?.ana || "EUR") === (b?.ana || "EUR") &&
-  ["EUR", "TRY", "RSD"].every((pb) => (a?.oran?.[pb] ?? null) === (b?.oran?.[pb] ?? null));
-const kurMetni = (kur) => (kur ? Object.entries(kur.oran || {}).map(([pb, v]) => `1 ${kur.ana} = ${sayiMetni(v)} ${pb}`).join(" · ") || "kur girilmemiş" : "kur yok");
+const ratesEqual = (a, b) => (a?.base || "EUR") === (b?.base || "EUR") &&
+  ["EUR", "TRY", "RSD"].every((cur) => (a?.rate?.[cur] ?? null) === (b?.rate?.[cur] ?? null));
+const ratesText = (rates) => (rates ? Object.entries(rates.rate || {}).map(([cur, v]) => `1 ${rates.base} = ${numText(v)} ${cur}`).join(" · ") || "no rates entered" : "no rates");
 
-const ucretMetni = (p) => p.odemeTuru && p.ucret
-  ? `${p.odemeTuru} · ${sayiMetni(p.ucret)} ${p.paraBirimi || ""}${p.odemeTuru === "Saatlik" ? "/saat" : "/ay"}` : "maaş girilmemiş";
-const bugunMetni = () => new Date().toISOString().slice(0, 10);
+const payText = (p) => p.payType && p.pay
+  ? `${p.payType} · ${numText(p.pay)} ${p.currency || ""}${p.payType === "Hourly" ? "/hour" : "/month"}` : "no pay entered";
+const todayText = () => new Date().toISOString().slice(0, 10);
 
-function alanHtml(k, deger) {
-  if (k.tur === "salt") return `<div class="deger-salt ${k.k === "kod" ? "kod" : ""}">${kacir(deger || "—")}</div>`;
-  if (k.tur === "secim") {
-    return `<select data-k="${k.k}"><option value=""></option>${k.secenek.map((o) =>
-      `<option ${o === deger ? "selected" : ""}>${kacir(o)}</option>`).join("")}</select>`;
+function fieldHtml(c, value) {
+  if (c.type === "readonly") return `<div class="ro-value ${c.key === "code" ? "code" : ""}">${esc(value || "—")}</div>`;
+  if (c.type === "select") {
+    return `<select data-k="${c.key}"><option value=""></option>${c.options.map((o) =>
+      `<option ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
   }
-  if (k.tur === "baglanti") return `<select data-k="${k.k}">${baglantiSecenekleri(k.kaynak, deger)}</select>`;
-  const tip = k.tur === "tarih" ? "date" : (k.tur === "sayi" || k.tur === "para") ? "number" : "text";
-  return `<input type="${tip}" data-k="${k.k}" value="${kacir(deger)}" ${k.tur === "para" ? 'step="0.01"' : ""}>`;
+  if (c.type === "link") return `<select data-k="${c.key}">${linkOptions(c.source, value)}</select>`;
+  const type = c.type === "date" ? "date" : (c.type === "number" || c.type === "money") ? "number" : "text";
+  return `<input type="${type}" data-k="${c.key}" value="${esc(value)}" ${c.type === "money" ? 'step="0.01"' : ""}>`;
 }
 
-function kart(baslik, sag = "") {
-  return el(`<div class="kart"><div class="kart-bas"><h3>${kacir(baslik)}</h3>${sag ? `<div class="sag">${sag}</div>` : ""}</div>
-    <div class="kart-govde"></div></div>`);
+function card(title, right = "") {
+  return el(`<div class="card"><div class="card-head"><h3>${esc(title)}</h3>${right ? `<div class="right">${right}</div>` : ""}</div>
+    <div class="card-body"></div></div>`);
 }
 
-function metrikler(liste) {
-  return `<div class="metrikler">${liste.map(([b, a, ek]) =>
-    `<div class="metrik"><b>${kacir(b)}</b><span>${kacir(a)}</span>${ek ? `<small>${kacir(ek)}</small>` : ""}</div>`).join("")}</div>`;
+function metrics(list) {
+  return `<div class="metrics">${list.map(([b, a, extra]) =>
+    `<div class="metric"><b>${esc(b)}</b><span>${esc(a)}</span>${extra ? `<small>${esc(extra)}</small>` : ""}</div>`).join("")}</div>`;
 }
 
-function kisiSatiri(p, { cikar, ek } = {}) {
-  return `<div class="liste-sat">
-    <a class="kod" href="#d/personel/${p._id}">${kacir(p.kod)}</a>
-    <span class="ad">${kacir(p.ad)}</span>
-    <span class="mt">${kacir([ek, p.gorev, ucretMetni(p)].filter(Boolean).join(" · "))}</span>
-    ${cikar ? `<button class="dg ufak tehlike" data-cikar="${p._id}">${kacir(cikar)}</button>` : ""}</div>`;
+function personRow(p, { remove, extra } = {}) {
+  return `<div class="list-row">
+    <a class="code" href="#d/employees/${p._id}">${esc(p.code)}</a>
+    <span class="name">${esc(p.name)}</span>
+    <span class="meta">${esc([extra, p.role, payText(p)].filter(Boolean).join(" · "))}</span>
+    ${remove ? `<button class="btn small danger" data-remove="${p._id}">${esc(remove)}</button>` : ""}</div>`;
 }
 
-function zimmetSatiri(z) {
-  return `<div class="liste-sat">
-    <span class="pul-k ${z.sahipTuru === "Ekip" ? "ekip" : ""}">${z.sahipTuru === "Ekip" ? "ekip" : "kişi"}</span>
-    <span class="ad">${kacir(z.demirbas)}${Number(z.adet) > 1 ? ` × ${kacir(z.adet)}` : ""}</span>
-    <span class="mt">${kacir([z.kategori, z.seriNo, z.sahipAd, z.durum].filter(Boolean).join(" · "))}</span></div>`;
+function equipmentRow(z) {
+  return `<div class="list-row">
+    <span class="chip ${z.ownerType === "Crew" ? "crew" : ""}">${z.ownerType === "Crew" ? "crew" : "person"}</span>
+    <span class="name">${esc(z.item)}${Number(z.quantity) > 1 ? ` × ${esc(z.quantity)}` : ""}</span>
+    <span class="meta">${esc([z.category, z.serialNo, z.ownerName, z.status].filter(Boolean).join(" · "))}</span></div>`;
 }
 
-const bosSatir = (metin) => `<div class="liste-bos">${kacir(metin)}</div>`;
+const emptyRow = (text) => `<div class="list-empty">${esc(text)}</div>`;
 
-/** Personelin ekip / ev alanını değiştirir (atama ve çıkarma). */
-async function personelAta(id, alanlar, mesaj) {
+/** Changes an employee's crew / house field (assigning and removing). */
+async function assignEmployee(id, fields, message) {
   try {
-    const y = await api(`/tablo/personel/${id}`, { method: "PUT", body: JSON.stringify(alanlar) });
-    if (y.uyari) bildir(mesaj, y.uyari, "hata"); else bildir(mesaj, "", "iyi");
-    await durumYukle(); await yonlendir();
-  } catch (e) { hataBildir(e); }
+    const y = await api(`/table/employees/${id}`, { method: "PUT", body: JSON.stringify(fields) });
+    if (y.warning) toast(message, y.warning, "error"); else toast(message, "", "good");
+    await loadStatus(); await route();
+  } catch (e) { toastError(e); }
 }
 
-/** Seçim kutusu + Ekle düğmesi; seçilen kaydı geri verir. */
-function eklemeSatiri(secenekler, dugme, bos, isle) {
-  const s = el(`<div class="ekle-sat">
-    <select>${secenekler.length ? `<option value="">${kacir(bos)}</option>` : `<option value="">Eklenecek kayıt yok</option>`}
-      ${secenekler.map(([v, e]) => `<option value="${kacir(v)}">${kacir(e)}</option>`).join("")}</select>
-    <button class="dg ufak bas" ${secenekler.length ? "" : "disabled"}>${kacir(dugme)}</button></div>`);
-  s.querySelector("button").onclick = () => { const v = s.querySelector("select").value; if (v) isle(v); };
+/** A select box + Add button; hands back the chosen record. */
+function addRow(options, button, blank, handle) {
+  const s = el(`<div class="add-row">
+    <select>${options.length ? `<option value="">${esc(blank)}</option>` : `<option value="">Nothing to add</option>`}
+      ${options.map(([v, e]) => `<option value="${esc(v)}">${esc(e)}</option>`).join("")}</select>
+    <button class="btn small primary" ${options.length ? "" : "disabled"}>${esc(button)}</button></div>`);
+  s.querySelector("button").onclick = () => { const v = s.querySelector("select").value; if (v) handle(v); };
   return s;
 }
 
-async function detayCiz(tabloAdi, id) {
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  await kaynaklariYukle();
+async function renderDetail(tableName, id) {
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  await loadSources();
   let v;
-  try { v = await api(`/detay/${tabloAdi}/${id}`); }
+  try { v = await api(`/detail/${tableName}/${id}`); }
   catch (e) {
-    ana.innerHTML = `<div class="bos"><div class="bs">Kayıt bulunamadı</div><p>${kacir(e.message)}</p></div>`;
+    main.innerHTML = `<div class="empty"><div class="big">Record not found</div><p>${esc(e.message)}</p></div>`;
     return;
   }
-  const { tanim, satir } = v;
+  const { def, row } = v;
 
-  ana.innerHTML = "";
-  const bas = el(`<div class="sayfa-bas"><div>
-      <a class="geri" href="#t/${tabloAdi}">← ${kacir(tanim.ad)}</a>
-      <h2>${satir.kod ? `<span class="baslik-kod">${kacir(satir.kod)}</span>` : ""}${kacir(satir.ad || "")}</h2>
-      <p>${kacir(tanim.aciklama)}</p></div>
-    <div class="bas-arac">${tabloAdi === "personel" && satir.kod ? `<a class="dg" href="#calisan/${encodeURIComponent(satir.kod)}"
-        title="Bu kişinin göreceği sayfa: puantajı, hakedişi, kesinti nedenleri ve ödemeleri">Çalışanın gözünden</a>` : ""}
-      ${v.klasorYolu ? `<button class="dg" data-is="klasor">Klasörü aç</button>` : ""}</div></div>`);
-  ana.appendChild(bas);
-  bas.querySelector('[data-is="klasor"]')?.addEventListener("click", async () => {
-    try { await api("/klasor-ac", { method: "POST", body: JSON.stringify({ yol: v.klasorYolu }) }); } catch (e) { hataBildir(e); }
+  main.innerHTML = "";
+  const head = el(`<div class="page-head"><div>
+      <a class="back" href="#t/${tableName}">← ${esc(def.name)}</a>
+      <h2>${row.code ? `<span class="title-code">${esc(row.code)}</span>` : ""}${esc(row.name || "")}</h2>
+      <p>${esc(def.description)}</p></div>
+    <div class="head-tools">${tableName === "employees" && row.code ? `<a class="btn" href="#employee/${encodeURIComponent(row.code)}"
+        title="The page this person would see: timesheet, earnings, reasons for deductions and payments">Employee's view</a>` : ""}
+      ${v.folderPath ? `<button class="btn" data-do="folder">Open folder</button>` : ""}</div></div>`);
+  main.appendChild(head);
+  head.querySelector('[data-do="folder"]')?.addEventListener("click", async () => {
+    try { await api("/open-folder", { method: "POST", body: JSON.stringify({ path: v.folderPath }) }); } catch (e) { toastError(e); }
   });
 
-  const duzen = el(`<div class="detay-duzen"><div class="detay-sol"></div><div class="detay-sag"></div></div>`);
-  ana.appendChild(duzen);
-  duzen.querySelector(".detay-sol").appendChild(bilgiKarti(tabloAdi, tanim, satir));
-  const sag = duzen.querySelector(".detay-sag");
-  ({ personel: personelDetay, ekip: ekipDetay, proje: projeDetay, ev: evDetay })[tabloAdi]?.(sag, v);
+  const layout = el(`<div class="detail-layout"><div class="detail-left"></div><div class="detail-right"></div></div>`);
+  main.appendChild(layout);
+  layout.querySelector(".detail-left").appendChild(infoCard(tableName, def, row));
+  const right = layout.querySelector(".detail-right");
+  ({ employees: employeeDetail, crews: crewDetail, projects: projectDetail, houses: houseDetail })[tableName]?.(right, v);
 }
 
-function bilgiKarti(tabloAdi, tanim, satir) {
-  const k = kart("Bilgiler");
-  const g = k.querySelector(".kart-govde");
-  g.innerHTML = `<div class="form-izgara">${tanim.kolon.map((c) =>
-    `<label class="alan"><span>${kacir(c.b)}</span>${alanHtml(c, satir[c.k] ?? "")}</label>`).join("")}</div>
-    <div class="form-alt"><button class="dg bas" data-kaydet>Değişiklikleri kaydet</button></div>`;
-  g.querySelector("[data-kaydet]").onclick = async (ev) => {
-    const gelen = {};
-    for (const a of g.querySelectorAll("[data-k]")) gelen[a.dataset.k] = a.value;
+function infoCard(tableName, def, row) {
+  const k = card("Details");
+  const g = k.querySelector(".card-body");
+  g.innerHTML = `<div class="form-grid">${def.columns.map((c) =>
+    `<label class="field"><span>${esc(c.label)}</span>${fieldHtml(c, row[c.key] ?? "")}</label>`).join("")}</div>
+    <div class="form-foot"><button class="btn primary" data-save>Save changes</button></div>`;
+  g.querySelector("[data-save]").onclick = async (ev) => {
+    const fields = {};
+    for (const a of g.querySelectorAll("[data-k]")) fields[a.dataset.k] = a.value;
     ev.target.disabled = true;
     try {
-      const y = await api(`/tablo/${tabloAdi}/${satir._id}`, { method: "PUT", body: JSON.stringify(gelen) });
-      if (y.uyari) bildir("Kaydedildi, ama dikkat", y.uyari, "hata");
-      else if (y.adDegisikligi) bildir("Kaydedildi", `Klasör yeniden adlandırıldı: ${y.adDegisikligi.yeni}`, "iyi");
-      else bildir("Kaydedildi", "", "iyi");
-      S.agac = null; S.hedefler = [];
-      await durumYukle(); await yonlendir();
-    } catch (e) { hataBildir(e); ev.target.disabled = false; }
+      const y = await api(`/table/${tableName}/${row._id}`, { method: "PUT", body: JSON.stringify(fields) });
+      if (y.warning) toast("Saved, but note", y.warning, "error");
+      else if (y.renamed) toast("Saved", `Folder renamed: ${y.renamed.to}`, "good");
+      else toast("Saved", "", "good");
+      S.tree = null; S.targets = [];
+      await loadStatus(); await route();
+    } catch (e) { toastError(e); ev.target.disabled = false; }
   };
   return k;
 }
 
 /**
- * Kişinin çalışma dönemleri (kontratlar): proje, başlangıç ve önceden girilebilen işten çıkış tarihi.
- * Çalışma dönemi girilen kişinin durumu, puantaja girdiği günler ve öngörüsü bu tarihlerden gelir.
+ * The person's employment periods (contracts): project, start and an end (leaving) date that can be entered in advance.
+ * For a person with employment periods, the status, the days they appear in timesheets and their forecast come from these dates.
  */
-function calismaKarti(v) {
-  const kisi = v.satir;
-  const liste = v.kontratlar || [];
-  const calisma = liste.filter((r) => r.tur !== "İzin");
-  const k = kart("Çalışma Dönemleri", `<a class="dg ufak" href="#t/kontrat">Tüm kişiler</a>`);
-  const g = k.querySelector(".kart-govde");
+function contractsCard(v) {
+  const person = v.row;
+  const list = v.contracts || [];
+  const work = list.filter((r) => r.type !== "Leave");
+  const k = card("Employment Periods", `<a class="btn small" href="#t/contracts">All people</a>`);
+  const g = k.querySelector(".card-body");
 
-  const suren = calisma.find((r) => r.durumEtiketi === "Sürüyor");
-  const sonraki = [...calisma].reverse().find((r) => r.durumEtiketi === "Başlamadı");
-  let ust;
-  if (!calisma.length) {
-    ust = `<div class="ipucu-kutu">Çalışma dönemi girilmemiş; durum (${kacir(kisi.durum || "Aktif")}) elle ayarlanıyor.
-      Bir dönem girince durum bugüne göre kendiliğinden değişir, kişi puantaja ve öngörüye sadece bu tarihler arasında girer.
-      İşten çıkış tarihi önceden girilebilir.</div>`;
+  const ongoing = work.find((r) => r.statusLabel === "Ongoing");
+  const next = [...work].reverse().find((r) => r.statusLabel === "Not started");
+  let top;
+  if (!work.length) {
+    top = `<div class="hint-box">No employment period entered; the status (${esc(person.status || "Active")}) is set by hand.
+      Once a period is entered the status follows today's date by itself, and the person appears in timesheets and the forecast only between these dates.
+      The leaving date can be entered in advance.</div>`;
   } else {
-    const siradaki = suren || sonraki;
-    const cikis = siradaki?.bitis || "";
-    const f = cikis ? gunFarki(cikis) : null;
-    ust = metrikler([
-      [kisi.durum || "—", "Bugünkü durum", "çalışma dönemlerinden"],
-      [suren ? suren.projeAd || "proje girilmemiş" : sonraki ? `${tarihKisa(sonraki.baslangic)}'de başlıyor` : "Çalışmıyor", suren ? "Şu anki proje" : "Çalışma"],
-      [siradaki ? (cikis ? tarihKisa(cikis) : "süresiz") : "—", "İşten çıkış", f !== null ? (f === 0 ? "bugün" : `${f} gün kaldı`) : ""],
+    const current = ongoing || next;
+    const leaving = current?.end || "";
+    const f = leaving ? daysUntil(leaving) : null;
+    top = metrics([
+      [person.status || "—", "Status today", "from employment periods"],
+      [ongoing ? ongoing.projectName || "no project entered" : next ? `starts ${shortDate(next.start)}` : "Not working", ongoing ? "Current project" : "Work"],
+      [current ? (leaving ? shortDate(leaving) : "open-ended") : "—", "Leaving date", f !== null ? (f === 0 ? "today" : `${plural(f, "day")} left`) : ""],
     ]);
   }
-  g.innerHTML = `${ust}
-    ${liste.length ? `<table class="mini kt-tablo"><thead><tr><th>Tür</th><th>Proje</th><th>Başlangıç</th><th>Bitiş</th><th>Durum</th><th></th></tr></thead><tbody>
-      ${liste.map((r) => `<tr data-id="${kacir(r._id)}" class="${r.durumEtiketi === "Bitti" ? "kt-bitti" : ""}">
-        <td>${kacir(r.tur || "Çalışma")}</td><td>${kacir(r.projeAd || "—")}</td><td>${tarihKisa(r.baslangic)}</td>
-        <td>${r.bitis ? tarihKisa(r.bitis) : `<span class="soluk">süresiz</span>`}</td>
-        <td><span class="pul-k ${r.durumEtiketi === "Sürüyor" ? "iyi" : ""}">${kacir(r.durumEtiketi)}</span></td>
-        <td class="kt-islem">${r.tur !== "İzin" && !r.bitis && r.durumEtiketi !== "Bitti" ? `<button class="dg ufak" data-cikis>Çıkış tarihi gir</button>` : ""}
-          <button class="dg ufak" data-duzenle>Düzenle</button><button class="dg ufak tehlike" data-sil>Sil</button></td></tr>
-        ${r.notlar ? `<tr class="kt-not"><td colspan="6">${kacir(r.notlar)}</td></tr>` : ""}`).join("")}
+  g.innerHTML = `${top}
+    ${list.length ? `<table class="mini ct-table"><thead><tr><th>Type</th><th>Project</th><th>Start</th><th>End</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((r) => `<tr data-id="${esc(r._id)}" class="${r.statusLabel === "Ended" ? "ct-ended" : ""}">
+        <td>${esc(r.type || "Work")}</td><td>${esc(r.projectName || "—")}</td><td>${shortDate(r.start)}</td>
+        <td>${r.end ? shortDate(r.end) : `<span class="muted">open-ended</span>`}</td>
+        <td><span class="chip ${r.statusLabel === "Ongoing" ? "good" : ""}">${esc(r.statusLabel)}</span></td>
+        <td class="ct-actions">${r.type !== "Leave" && !r.end && r.statusLabel !== "Ended" ? `<button class="btn small" data-leave>Enter leaving date</button>` : ""}
+          <button class="btn small" data-edit>Edit</button><button class="btn small danger" data-delete>Delete</button></td></tr>
+        ${r.notes ? `<tr class="ct-note"><td colspan="6">${esc(r.notes)}</td></tr>` : ""}`).join("")}
       </tbody></table>` : ""}
-    <div class="kt-form">
-      <div class="alt-baslik" data-baslik>Yeni dönem</div>
-      <div class="kt-alanlar">
-        <label class="alan"><span>Tür</span><select data-f="tur"><option>Çalışma</option><option>İzin</option></select></label>
-        <label class="alan"><span>Proje</span><select data-f="proje">${baglantiSecenekleri("proje", "")}</select></label>
-        <label class="alan"><span>Başlangıç</span><input type="date" data-f="baslangic"></label>
-        <label class="alan"><span>Bitiş (işten çıkış)</span><input type="date" data-f="bitis"></label>
-        <label class="alan kt-genis"><span>Not</span><input type="text" data-f="notlar" placeholder="ör. 6 aylık kontrat, uzatılabilir"></label>
+    <div class="ct-form">
+      <div class="subhead" data-title>New period</div>
+      <div class="ct-fields">
+        <label class="field"><span>Type</span><select data-f="type"><option>Work</option><option>Leave</option></select></label>
+        <label class="field"><span>Project</span><select data-f="project">${linkOptions("projects", "")}</select></label>
+        <label class="field"><span>Start</span><input type="date" data-f="start"></label>
+        <label class="field"><span>End (leaving date)</span><input type="date" data-f="end"></label>
+        <label class="field ct-wide"><span>Note</span><input type="text" data-f="notes" placeholder="e.g. 6-month contract, can be extended"></label>
       </div>
-      <div class="form-alt"><button class="dg" data-vazgec style="display:none">Vazgeç</button><button class="dg bas" data-kaydet>Dönemi ekle</button></div>
+      <div class="form-foot"><button class="btn" data-cancel style="display:none">Cancel</button><button class="btn primary" data-save>Add period</button></div>
     </div>`;
 
-  const form = g.querySelector(".kt-form");
-  const alan = (ad) => form.querySelector(`[data-f="${ad}"]`);
-  let duzenlenen = null;
-  const formuDoldur = (r) => {
-    duzenlenen = r;
-    const sonBitis = calisma.map((x) => x.bitis).filter(Boolean).sort().at(-1);
-    const varsayilan = {
-      tur: "Çalışma", proje: suren?.proje || v.proje?.kod || "",
-      baslangic: sonBitis ? gunEkle(sonBitis, 1) : kisi.iseGiris || bugunStr(), bitis: "", notlar: "",
+  const form = g.querySelector(".ct-form");
+  const field = (name) => form.querySelector(`[data-f="${name}"]`);
+  let editing = null;
+  const fillForm = (r) => {
+    editing = r;
+    const lastEnd = work.map((x) => x.end).filter(Boolean).sort().at(-1);
+    const defaults = {
+      type: "Work", project: ongoing?.project || v.project?.code || "",
+      start: lastEnd ? addDays(lastEnd, 1) : person.startDate || todayStr(), end: "", notes: "",
     };
-    for (const ad of ["tur", "proje", "baslangic", "bitis", "notlar"]) alan(ad).value = (r ? r[ad] : varsayilan[ad]) || "";
-    form.querySelector("[data-baslik]").textContent = r ? `Düzenleniyor: ${r.tur || "Çalışma"} · ${tarihKisa(r.baslangic)}` : "Yeni dönem";
-    form.querySelector("[data-kaydet]").textContent = r ? "Değişiklikleri kaydet" : "Dönemi ekle";
-    form.querySelector("[data-vazgec]").style.display = r ? "" : "none";
+    for (const name of ["type", "project", "start", "end", "notes"]) field(name).value = (r ? r[name] : defaults[name]) || "";
+    form.querySelector("[data-title]").textContent = r ? `Editing: ${r.type || "Work"} · ${shortDate(r.start)}` : "New period";
+    form.querySelector("[data-save]").textContent = r ? "Save changes" : "Add period";
+    form.querySelector("[data-cancel]").style.display = r ? "" : "none";
   };
-  formuDoldur(null);
+  fillForm(null);
 
-  const bul = (b) => liste.find((r) => r._id === b.closest("tr").dataset.id);
-  g.querySelectorAll("[data-duzenle]").forEach((b) => b.onclick = () => { formuDoldur(bul(b)); form.scrollIntoView({ block: "nearest" }); });
-  g.querySelectorAll("[data-cikis]").forEach((b) => b.onclick = () => {
-    formuDoldur(bul(b));
-    alan("bitis").focus();
-    alan("bitis").showPicker?.();
+  const find = (b) => list.find((r) => r._id === b.closest("tr").dataset.id);
+  g.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => { fillForm(find(b)); form.scrollIntoView({ block: "nearest" }); });
+  g.querySelectorAll("[data-leave]").forEach((b) => b.onclick = () => {
+    fillForm(find(b));
+    field("end").focus();
+    field("end").showPicker?.();
   });
-  form.querySelector("[data-vazgec]").onclick = () => formuDoldur(null);
-  g.querySelectorAll("[data-sil]").forEach((b) => b.onclick = async () => {
-    const r = bul(b);
-    if (!(await onay("Çalışma dönemi silinsin mi?", `${r.tur || "Çalışma"} · ${tarihKisa(r.baslangic)} – ${r.bitis ? tarihKisa(r.bitis) : "süresiz"} silinecek. ` +
-      "Kişinin durumu ve açık puantaj dönemleri kalan kayıtlara göre yeniden hesaplanır.", "Sil"))) return;
-    try { await api(`/tablo/kontrat/${r._id}`, { method: "DELETE" }); bildir("Çalışma dönemi silindi", "", "iyi"); await durumYukle(); await yonlendir(); }
-    catch (e) { hataBildir(e); }
+  form.querySelector("[data-cancel]").onclick = () => fillForm(null);
+  g.querySelectorAll("[data-delete]").forEach((b) => b.onclick = async () => {
+    const r = find(b);
+    if (!(await confirmBox("Delete this employment period?", `${r.type || "Work"} · ${shortDate(r.start)} – ${r.end ? shortDate(r.end) : "open-ended"} will be deleted. ` +
+      "The person's status and open timesheet periods are recalculated from the remaining records.", "Delete"))) return;
+    try { await api(`/table/contracts/${r._id}`, { method: "DELETE" }); toast("Employment period deleted", "", "good"); await loadStatus(); await route(); }
+    catch (e) { toastError(e); }
   });
-  form.querySelector("[data-kaydet]").onclick = async (ev) => {
-    const veri = { personelKod: kisi.kod };
-    for (const ad of ["tur", "proje", "baslangic", "bitis", "notlar"]) veri[ad] = alan(ad).value.trim();
+  form.querySelector("[data-save]").onclick = async (ev) => {
+    const data = { employeeCode: person.code };
+    for (const name of ["type", "project", "start", "end", "notes"]) data[name] = field(name).value.trim();
     ev.target.disabled = true;
     try {
-      if (duzenlenen) await api(`/tablo/kontrat/${duzenlenen._id}`, { method: "PUT", body: JSON.stringify(veri) });
-      else await api("/tablo/kontrat", { method: "POST", body: JSON.stringify(veri) });
-      bildir(duzenlenen ? "Çalışma dönemi güncellendi" : "Çalışma dönemi eklendi", "Durum ve açık puantaj dönemleri bu tarihlere göre güncellendi.", "iyi");
-      await durumYukle(); await yonlendir();
-    } catch (e) { hataBildir(e); ev.target.disabled = false; }
+      if (editing) await api(`/table/contracts/${editing._id}`, { method: "PUT", body: JSON.stringify(data) });
+      else await api("/table/contracts", { method: "POST", body: JSON.stringify(data) });
+      toast(editing ? "Employment period updated" : "Employment period added", "Status and open timesheet periods were updated to these dates.", "good");
+      await loadStatus(); await route();
+    } catch (e) { toastError(e); ev.target.disabled = false; }
   };
   return k;
 }
 
 /**
- * Kişinin notları: ad + metin, her not ayrı kaydedilir. Altta kaydedilmiş notların adları;
- * ada tıklayınca metin açılır, ✎ düzenler, ✕ onay alıp siler. Yönetici notudur, çalışan sayfasına girmez.
+ * The person's notes: a title + text, each note saved separately. Below are the titles of saved notes;
+ * clicking a title shows the text, ✎ edits it, ✕ deletes it after confirmation. These are manager notes and never reach the employee's page.
  */
-function notlarKarti(v) {
-  const kod = v.satir.kod;
-  const liste = v.notlar || [];
-  const k = kart(`Notlar${liste.length ? ` · ${liste.length}` : ""}`);
-  const g = k.querySelector(".kart-govde");
-  g.innerHTML = `<div class="nt-form">
-      <label class="alan"><span>Not adı</span><input type="text" data-f="ad" maxlength="120" placeholder="ör. İzin talebi, uyarı, görüşme"></label>
-      <label class="alan"><span>Not</span><textarea data-f="metin" rows="4" placeholder="Notu buraya yazın…"></textarea></label>
-      <div class="form-alt"><span class="nt-durum soluk" data-durum></span>
-        <button class="dg" data-vazgec style="display:none">Vazgeç</button><button class="dg bas" data-kaydet>Kaydet</button></div>
+function notesCard(v) {
+  const code = v.row.code;
+  const list = v.notes || [];
+  const k = card(`Notes${list.length ? ` · ${list.length}` : ""}`);
+  const g = k.querySelector(".card-body");
+  g.innerHTML = `<div class="note-form">
+      <label class="field"><span>Note title</span><input type="text" data-f="title" maxlength="120" placeholder="e.g. Leave request, warning, meeting"></label>
+      <label class="field"><span>Note</span><textarea data-f="text" rows="4" placeholder="Write the note here…"></textarea></label>
+      <div class="form-foot"><span class="note-status muted" data-status></span>
+        <button class="btn" data-cancel style="display:none">Cancel</button><button class="btn primary" data-save>Save</button></div>
     </div>
-    <div class="nt-liste">${liste.length ? liste.map((n) => `<div class="nt-sat" data-id="${kacir(n._id)}">
-        <button class="nt-ad" data-ac title="Notu göster">${kacir(n.ad)}</button>
-        <span class="nt-tarih">${tarihKisa((n.guncelleme || n.olusturma || "").slice(0, 10))}</span>
-        <button class="nt-ik" data-duzenle title="Düzenle" aria-label="Düzenle">✎</button>
-        <button class="nt-ik tehlike" data-sil title="Sil" aria-label="Sil">✕</button>
-        <div class="nt-metin" hidden>${kacir(n.metin)}</div></div>`).join("")
-      : bosSatir("Henüz not yok. Yukarıdan ad ve not yazıp Kaydet'e basın.")}</div>`;
+    <div class="note-list">${list.length ? list.map((n) => `<div class="note-row" data-id="${esc(n._id)}">
+        <button class="note-title" data-show title="Show the note">${esc(n.title)}</button>
+        <span class="note-date">${shortDate((n.updated || n.created || "").slice(0, 10))}</span>
+        <button class="note-icon" data-edit title="Edit" aria-label="Edit">✎</button>
+        <button class="note-icon danger" data-delete title="Delete" aria-label="Delete">✕</button>
+        <div class="note-text" hidden>${esc(n.text)}</div></div>`).join("")
+      : emptyRow("No notes yet. Type a title and a note above and press Save.")}</div>`;
 
-  const alan = (ad) => g.querySelector(`[data-f="${ad}"]`);
-  let duzenlenen = null;
-  const formuAc = (n) => {
-    duzenlenen = n;
-    alan("ad").value = n?.ad || "";
-    alan("metin").value = n?.metin || "";
-    g.querySelector("[data-durum]").textContent = n ? `Düzenleniyor: ${n.ad}` : "";
-    g.querySelector("[data-vazgec]").style.display = n ? "" : "none";
-    g.querySelector("[data-kaydet]").textContent = n ? "Değişiklikleri kaydet" : "Kaydet";
-    g.querySelectorAll(".nt-sat").forEach((x) => x.classList.toggle("secili", x.dataset.id === n?._id));
+  const field = (name) => g.querySelector(`[data-f="${name}"]`);
+  let editing = null;
+  const openForm = (n) => {
+    editing = n;
+    field("title").value = n?.title || "";
+    field("text").value = n?.text || "";
+    g.querySelector("[data-status]").textContent = n ? `Editing: ${n.title}` : "";
+    g.querySelector("[data-cancel]").style.display = n ? "" : "none";
+    g.querySelector("[data-save]").textContent = n ? "Save changes" : "Save";
+    g.querySelectorAll(".note-row").forEach((x) => x.classList.toggle("selected", x.dataset.id === n?._id));
   };
-  const notu = (b) => liste.find((n) => n._id === b.closest(".nt-sat").dataset.id);
+  const noteOf = (b) => list.find((n) => n._id === b.closest(".note-row").dataset.id);
 
-  g.querySelectorAll("[data-ac]").forEach((b) => b.onclick = () => {
-    const m = b.closest(".nt-sat").querySelector(".nt-metin");
+  g.querySelectorAll("[data-show]").forEach((b) => b.onclick = () => {
+    const m = b.closest(".note-row").querySelector(".note-text");
     m.hidden = !m.hidden;
   });
-  g.querySelectorAll("[data-duzenle]").forEach((b) => b.onclick = () => { formuAc(notu(b)); alan("metin").focus(); });
-  g.querySelector("[data-vazgec]").onclick = () => formuAc(null);
-  g.querySelectorAll("[data-sil]").forEach((b) => b.onclick = async () => {
-    const n = notu(b);
-    if (!(await onay("Not silinsin mi?", `"${n.ad}" notu kalıcı olarak silinecek.`, "Sil"))) return;
-    try { await api(`/notlar/${n._id}`, { method: "DELETE" }); bildir("Not silindi", "", "iyi"); await yonlendir(); }
-    catch (e) { hataBildir(e); }
+  g.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => { openForm(noteOf(b)); field("text").focus(); });
+  g.querySelector("[data-cancel]").onclick = () => openForm(null);
+  g.querySelectorAll("[data-delete]").forEach((b) => b.onclick = async () => {
+    const n = noteOf(b);
+    if (!(await confirmBox("Delete this note?", `The note "${n.title}" will be deleted for good.`, "Delete"))) return;
+    try { await api(`/notes/${n._id}`, { method: "DELETE" }); toast("Note deleted", "", "good"); await route(); }
+    catch (e) { toastError(e); }
   });
-  g.querySelector("[data-kaydet]").onclick = async (ev) => {
-    const veri = { personelKod: kod, ad: alan("ad").value, metin: alan("metin").value };
-    if (!veri.metin.trim()) { alan("metin").focus(); return bildir("Not boş", "Kaydetmeden önce notu yazın.", "hata"); }
+  g.querySelector("[data-save]").onclick = async (ev) => {
+    const data = { employeeCode: code, title: field("title").value, text: field("text").value };
+    if (!data.text.trim()) { field("text").focus(); return toast("Empty note", "Write the note before saving.", "error"); }
     ev.target.disabled = true;
     try {
-      if (duzenlenen) await api(`/notlar/${duzenlenen._id}`, { method: "PUT", body: JSON.stringify(veri) });
-      else await api("/notlar", { method: "POST", body: JSON.stringify(veri) });
-      bildir(duzenlenen ? "Not güncellendi" : "Not kaydedildi", "", "iyi");
-      await yonlendir();
-    } catch (e) { hataBildir(e); ev.target.disabled = false; }
+      if (editing) await api(`/notes/${editing._id}`, { method: "PUT", body: JSON.stringify(data) });
+      else await api("/notes", { method: "POST", body: JSON.stringify(data) });
+      toast(editing ? "Note updated" : "Note saved", "", "good");
+      await route();
+    } catch (e) { toastError(e); ev.target.disabled = false; }
   };
   return k;
 }
 
-function personelDetay(sag, v) {
-  // Çalışma dönemi olan kişide durum otomatik: Bilgiler kartında kilitlenir.
-  const durumAlani = ana.querySelector('.detay-sol select[data-k="durum"]');
-  if (durumAlani && v.durumOtomatik) {
-    durumAlani.disabled = true;
-    durumAlani.title = "Çalışma dönemlerinden bugüne göre hesaplanıyor. Değiştirmek için Çalışma Dönemleri kartını kullanın.";
-    durumAlani.closest(".alan")?.querySelector("span")?.insertAdjacentHTML("beforeend", ` <small class="soluk">· çalışma dönemlerinden</small>`);
+function employeeDetail(right, v) {
+  // For a person with employment periods the status is automatic: it is locked on the Details card.
+  const statusField = main.querySelector('.detail-left select[data-k="status"]');
+  if (statusField && v.statusAutomatic) {
+    statusField.disabled = true;
+    statusField.title = "Calculated from the employment periods for today. Use the Employment Periods card to change it.";
+    statusField.closest(".field")?.querySelector("span")?.insertAdjacentHTML("beforeend", ` <small class="muted">· from employment periods</small>`);
   }
 
-  const ekipK = kart("Ekip ve Proje");
-  ekipK.querySelector(".kart-govde").innerHTML = v.ekip
-    ? `${metrikler([
-        [v.ekip.kod, v.ekip.ad],
-        [v.proje ? v.proje.ad : "—", "Proje"],
-        [v.yemekGunluk?.tutar ? `${sayiMetni(v.yemekGunluk.tutar)} ${v.yemekGunluk.paraBirimi}` : "—", "Yemek / gün"],
-      ])}<a class="dg ufak" href="#d/ekip/${v.ekip._id}">Ekibe git</a>`
-    : bosSatir("Bir ekibe atanmamış. Soldaki Ekip alanından ya da ekibin sayfasından atayabilirsiniz.");
-  sag.appendChild(ekipK);
-  sag.appendChild(calismaKarti(v));
-  ana.querySelector(".detay-sol")?.appendChild(notlarKarti(v));
+  const crewCard = card("Crew and Project");
+  crewCard.querySelector(".card-body").innerHTML = v.crew
+    ? `${metrics([
+        [v.crew.code, v.crew.name],
+        [v.project ? v.project.name : "—", "Project"],
+        [v.mealDaily?.amount ? `${numText(v.mealDaily.amount)} ${v.mealDaily.currency}` : "—", "Meals / day"],
+      ])}<a class="btn small" href="#d/crews/${v.crew._id}">Go to crew</a>`
+    : emptyRow("Not assigned to a crew. Use the Crew field on the left or the crew's page.");
+  right.appendChild(crewCard);
+  right.appendChild(contractsCard(v));
+  main.querySelector(".detail-left")?.appendChild(notesCard(v));
 
-  const evK = kart("Konaklama");
-  evK.querySelector(".kart-govde").innerHTML = v.ev
-    ? `${metrikler([
-        [v.ev.kod, v.ev.ad],
-        [v.ev.doluluk, "Doluluk"],
-        [v.ev.kisiBasiKira, "Kira payı / ay", v.proje ? `→ ${v.proje.ad}` : ""],
-        [v.ev.kisiBasiGunluk, "Kira payı / gün", "gelmediği gün maaştan kesilir"],
-      ])}<a class="dg ufak" href="#d/ev/${v.ev._id}">Eve git</a>`
-    : bosSatir("Bir eve atanmamış.");
-  sag.appendChild(evK);
+  const houseCard = card("Housing");
+  houseCard.querySelector(".card-body").innerHTML = v.house
+    ? `${metrics([
+        [v.house.code, v.house.name],
+        [v.house.occupancy, "Occupancy"],
+        [v.house.rentPerPerson, "Rent share / month", v.project ? `→ ${v.project.name}` : ""],
+        [v.house.rentPerPersonDaily, "Rent share / day", "deducted from pay for days absent"],
+      ])}<a class="btn small" href="#d/houses/${v.house._id}">Go to house</a>`
+    : emptyRow("Not assigned to a house.");
+  right.appendChild(houseCard);
 
-  const zK = kart("Zimmetler", `<a class="dg ufak" href="#t/zimmet">Zimmet tablosu</a>`);
-  zK.querySelector(".kart-govde").innerHTML =
-    `<div class="alt-baslik">Kişisel</div>${v.kisiselZimmet.map(zimmetSatiri).join("") || bosSatir("Kişisel zimmet yok.")}
-     <div class="alt-baslik">Ekip zimmeti${v.ekip ? ` · ${kacir(v.ekip.kod)}` : ""}</div>${v.ekipZimmet.map(zimmetSatiri).join("") || bosSatir("Ekip zimmeti yok.")}`;
-  sag.appendChild(zK);
+  const eqCard = card("Equipment", `<a class="btn small" href="#t/equipment">Equipment table</a>`);
+  eqCard.querySelector(".card-body").innerHTML =
+    `<div class="subhead">Personal</div>${v.personalEquipment.map(equipmentRow).join("") || emptyRow("No personal equipment.")}
+     <div class="subhead">Crew equipment${v.crew ? ` · ${esc(v.crew.code)}` : ""}</div>${v.crewEquipment.map(equipmentRow).join("") || emptyRow("No crew equipment.")}`;
+  right.appendChild(eqCard);
 
-  const mK = kart("Maaş Geçmişi");
-  mK.querySelector(".kart-govde").innerHTML =
-    `<div class="ipucu-kutu">Maaş bölümü soldaki Bilgiler kartından değiştirilir. Değişiklik sadece bundan sonra açılan puantaj dönemlerine yansır; açılmış dönemler eski maaşla kalır.</div>
-     ${v.maasGecmisi.length ? `<table class="mini"><thead><tr><th>Tarih</th><th>Tür</th><th>Ücret</th><th>Değiştiren</th></tr></thead><tbody>
-       ${v.maasGecmisi.map((m) => `<tr><td>${kacir(m.tarih)}</td><td>${kacir(m.odemeTuru || "—")}</td>
-         <td>${m.ucret ? `${sayiMetni(m.ucret)} ${kacir(m.paraBirimi)}` : "—"}</td><td>${kacir(m.kullanici || "")}</td></tr>`).join("")}
-       </tbody></table>` : bosSatir("Henüz maaş kaydı yok.")}`;
-  sag.appendChild(mK);
+  const payCard = card("Pay History");
+  payCard.querySelector(".card-body").innerHTML =
+    `<div class="hint-box">Pay is changed on the Details card on the left. A change only applies to timesheet periods opened from now on; periods already open keep the old pay.</div>
+     ${v.payHistory.length ? `<table class="mini"><thead><tr><th>Date</th><th>Type</th><th>Pay</th><th>Changed by</th></tr></thead><tbody>
+       ${v.payHistory.map((m) => `<tr><td>${esc(m.date)}</td><td>${esc(m.payType || "—")}</td>
+         <td>${m.pay ? `${numText(m.pay)} ${esc(m.currency)}` : "—"}</td><td>${esc(m.user || "")}</td></tr>`).join("")}
+       </tbody></table>` : emptyRow("No pay records yet.")}`;
+  right.appendChild(payCard);
 
-  // Puantaj dönemlerinden gelen çalışma özeti (personel koduyla eşleşir).
-  const cK = kart("Çalışma Özeti", `<a class="dg ufak" href="#istatistik">Tüm istatistikler</a>`);
-  const cg = cK.querySelector(".kart-govde");
-  cg.innerHTML = `<span class="yukleniyor"></span>`;
-  sag.insertBefore(cK, evK);
-  api(`/istatistik/personel/${encodeURIComponent(v.satir.kod)}`).then((liste) => {
-    if (!liste.length) { cg.innerHTML = bosSatir("Henüz hiçbir puantaj döneminde yok."); return; }
-    const t = (alan) => liste.reduce((a, d) => a + d[alan], 0);
-    const tp = (alan) => liste.reduce((a, d) => { for (const [pb, n] of Object.entries(d[alan] || {})) a[pb] = (a[pb] || 0) + n; return a; }, {});
-    cg.innerHTML = metrikler([
-      [sayiMetni(t("toplam")), "Toplam saat", `${liste.length} dönem`],
-      [sayiMetni(t("mesai")), "Mesai"],
-      [sayiMetni(t("eksik")), "Eksik saat"],
-      [toplamMetni(tp("net")), "Net (avans düşülmüş)"],
-    ]) + `<table class="mini"><thead><tr><th>Dönem</th><th>Ekip</th><th>Saat</th><th>Mesai</th><th>Eksik</th><th>Hakediş</th><th>Avans</th><th>Net</th></tr></thead><tbody>
-      ${liste.map((d) => `<tr><td><a href="#puantaj/${d.donem}">${kacir(d.ad.replace(/ \(.*\)$/, ""))}</a>${d.durum === "kapali" ? ` <span class="pul-k">kapalı</span>` : ""}</td>
-        <td>${kacir(d.ekip || "—")}</td><td>${sayiMetni(d.toplam)}</td><td>${sayiMetni(d.mesai)}</td><td>${sayiMetni(d.eksik)}</td>
-        <td>${d.hakedis ? `${sayiMetni(d.hakedis)} ${kacir(d.paraBirimi)}` : "—"}</td><td>${toplamMetni(d.avans)}</td><td><b>${toplamMetni(d.net)}</b></td></tr>`).join("")}
+  // Work summary from the timesheet periods (matched by employee code).
+  const workCard = card("Work Summary", `<a class="btn small" href="#statistics">All statistics</a>`);
+  const cg = workCard.querySelector(".card-body");
+  cg.innerHTML = `<span class="spinner"></span>`;
+  right.insertBefore(workCard, houseCard);
+  api(`/statistics/employee/${encodeURIComponent(v.row.code)}`).then((list) => {
+    if (!list.length) { cg.innerHTML = emptyRow("Not in any timesheet period yet."); return; }
+    const t = (field) => list.reduce((a, d) => a + d[field], 0);
+    const tc = (field) => list.reduce((a, d) => { for (const [cur, n] of Object.entries(d[field] || {})) a[cur] = (a[cur] || 0) + n; return a; }, {});
+    cg.innerHTML = metrics([
+      [numText(t("total")), "Total hours", `${plural(list.length, "period")}`],
+      [numText(t("overtime")), "Overtime"],
+      [numText(t("short")), "Short hours"],
+      [totalText(tc("net")), "Net (advances deducted)"],
+    ]) + `<table class="mini"><thead><tr><th>Period</th><th>Crew</th><th>Hours</th><th>Overtime</th><th>Short</th><th>Earnings</th><th>Advance</th><th>Net</th></tr></thead><tbody>
+      ${list.map((d) => `<tr><td><a href="#timesheet/${d.period}">${esc(d.name.replace(/ \(.*\)$/, ""))}</a>${d.status === "closed" ? ` <span class="chip">closed</span>` : ""}</td>
+        <td>${esc(d.crew || "—")}</td><td>${numText(d.total)}</td><td>${numText(d.overtime)}</td><td>${numText(d.short)}</td>
+        <td>${d.earnings ? `${numText(d.earnings)} ${esc(d.currency)}` : "—"}</td><td>${totalText(d.advance)}</td><td><b>${totalText(d.net)}</b></td></tr>`).join("")}
       </tbody></table>`;
-    sag.insertBefore(devamsizlikKarti(liste), cK.nextSibling);
-  }).catch((e) => { cg.innerHTML = bosSatir(e.message); });
+    right.insertBefore(absenceCard(list), workCard.nextSibling);
+  }).catch((e) => { cg.innerHTML = emptyRow(e.message); });
 }
 
-/** Kişinin devamsızlık ve kesinti (zarar) istatistiği: gelmediği günler ve maaşından kesilenler. */
-function devamsizlikKarti(liste) {
-  const k = kart("Devamsızlık ve Kesinti");
-  const g = k.querySelector(".kart-govde");
-  const tp = (fn) => liste.reduce((a, d) => { const pb = d.paraBirimi; a[pb] = (a[pb] || 0) + (fn(d) || 0); return a; }, {});
-  const temiz = (t) => Object.fromEntries(Object.entries(t).filter(([, v]) => v));
-  const gelmedi = liste.reduce((a, d) => a + (d.gelmedi || 0), 0);
-  const kesinti = temiz(tp((d) => d.kesinti));
-  if (!gelmedi && !Object.keys(kesinti).length) { g.innerHTML = bosSatir("Gelmediği gün ya da kesinti yok."); return k; }
-  g.innerHTML = metrikler([
-    [String(gelmedi), "Gelmediği gün", `${liste.filter((d) => d.gelmedi).length} dönemde`],
-    [toplamMetni(temiz(tp((d) => (d.kesintiDetay?.maas || 0) + (d.kesintiDetay?.eksikSaat || 0)))), "Kesilen maaş"],
-    [toplamMetni(temiz(tp((d) => d.kesintiDetay?.kira))), "Kesilen kira payı"],
-    [toplamMetni(temiz(tp((d) => d.kesintiDetay?.yemek))), "Kesilen yemek"],
-    [toplamMetni(kesinti), "Toplam kesinti"],
-  ]) + `<table class="mini"><thead><tr><th>Dönem</th><th>Gelmediği günler</th><th>Maaş</th><th>Kira</th><th>Yemek</th><th>Toplam</th></tr></thead><tbody>
-    ${liste.filter((d) => d.gelmedi || d.kesinti).map((d) => {
-      const kd = d.kesintiDetay || {};
-      const pb = ` ${kacir(d.paraBirimi)}`;
-      const disi = Object.entries(d.kesintiDisi || {}).map(([a, n]) => `${a} ${sayiMetni(n)}`).join(", ");
-      return `<tr><td><a href="#puantaj/${d.donem}">${kacir(d.ad.replace(/ \(.*\)$/, ""))}</a>${d.kural === 1 ? ` <span class="pul-k" title="Eski kural: eksik saat × saat değeri">eski kural</span>` : ""}</td>
-        <td>${(d.gelmediGunler || []).map((x) => x.slice(8, 10)).join(", ") || "—"}</td>
-        <td>${sayiMetni((kd.maas || 0) + (kd.eksikSaat || 0))}${pb}</td><td>${sayiMetni(kd.kira || 0)}${pb}</td><td>${sayiMetni(kd.yemek || 0)}${pb}</td>
-        <td><b>${sayiMetni(d.kesinti)}${pb}</b>${disi ? `<div class="soluk" title="Farklı para birimi; maaştan düşülmedi">+ ${kacir(disi)}</div>` : ""}</td></tr>
-        ${d.kural >= 2 && (d.kesintiKalem || []).length ? `<tr class="kd-sat"><td colspan="6">${kesintiSatirlari(d).map(kacir).join("<br>")}</td></tr>` : ""}`;
+/** The person's absence and deduction statistics: days absent and what was deducted from their pay. */
+function absenceCard(list) {
+  const k = card("Absence and Deductions");
+  const g = k.querySelector(".card-body");
+  const tc = (fn) => list.reduce((a, d) => { const cur = d.currency; a[cur] = (a[cur] || 0) + (fn(d) || 0); return a; }, {});
+  const clean = (t) => Object.fromEntries(Object.entries(t).filter(([, v]) => v));
+  const absent = list.reduce((a, d) => a + (d.absent || 0), 0);
+  const deduction = clean(tc((d) => d.deduction));
+  if (!absent && !Object.keys(deduction).length) { g.innerHTML = emptyRow("No days absent and no deductions."); return k; }
+  g.innerHTML = metrics([
+    [String(absent), "Days absent", `in ${plural(list.filter((d) => d.absent).length, "period")}`],
+    [totalText(clean(tc((d) => (d.deductionDetail?.salary || 0) + (d.deductionDetail?.shortHours || 0)))), "Pay deducted"],
+    [totalText(clean(tc((d) => d.deductionDetail?.rent))), "Rent share deducted"],
+    [totalText(clean(tc((d) => d.deductionDetail?.meals))), "Meals deducted"],
+    [totalText(deduction), "Total deductions"],
+  ]) + `<table class="mini"><thead><tr><th>Period</th><th>Days absent</th><th>Pay</th><th>Rent</th><th>Meals</th><th>Total</th></tr></thead><tbody>
+    ${list.filter((d) => d.absent || d.deduction).map((d) => {
+      const dd = d.deductionDetail || {};
+      const cur = ` ${esc(d.currency)}`;
+      const outside = Object.entries(d.notDeducted || {}).map(([a, n]) => `${a} ${numText(n)}`).join(", ");
+      return `<tr><td><a href="#timesheet/${d.period}">${esc(d.name.replace(/ \(.*\)$/, ""))}</a>${d.rule === 1 ? ` <span class="chip" title="Old rule: short hours × hourly value">old rule</span>` : ""}</td>
+        <td>${(d.absentDays || []).map((x) => x.slice(8, 10)).join(", ") || "—"}</td>
+        <td>${numText((dd.salary || 0) + (dd.shortHours || 0))}${cur}</td><td>${numText(dd.rent || 0)}${cur}</td><td>${numText(dd.meals || 0)}${cur}</td>
+        <td><b>${numText(d.deduction)}${cur}</b>${outside ? `<div class="muted" title="Different currency; not deducted from pay">+ ${esc(outside)}</div>` : ""}</td></tr>
+        ${d.rule >= 2 && (d.deductionItems || []).length ? `<tr class="dd-row"><td colspan="6">${deductionLines(d).map(esc).join("<br>")}</td></tr>` : ""}`;
     }).join("")}</tbody></table>`;
   return k;
 }
 
-function ekipDetay(sag, v) {
-  const { satir, hesap } = v;
+function crewDetail(right, v) {
+  const { row, calc } = v;
 
-  const yK = kart("Yemek");
-  yK.querySelector(".kart-govde").innerHTML = metrikler([
-    [hesap.yemekKisiGunluk ? `${sayiMetni(hesap.yemekKisiGunluk)} ${hesap.paraBirimi}` : "—", "Kişi başı / gün"],
-    [String(hesap.kisiSayisi), "Kişi"],
-    [`${sayiMetni(hesap.yemekEkipGunluk)} ${hesap.paraBirimi}`, "Ekip / gün"],
-    [`${sayiMetni(hesap.yemekEkipDonem)} ${hesap.paraBirimi}`, "Ekip / 15 gün", "puantaj gelince çalışılan güne göre"],
-  ]) + `<div class="ipucu-kutu">Ekip yemeği = kişi başı günlük tutar × ekipteki kişi sayısı. Tutarı soldaki Bilgiler kartından değiştirebilirsiniz.</div>`;
-  sag.appendChild(yK);
+  const mealCard = card("Meals");
+  mealCard.querySelector(".card-body").innerHTML = metrics([
+    [calc.mealPerPersonDaily ? `${numText(calc.mealPerPersonDaily)} ${calc.currency}` : "—", "Per person / day"],
+    [String(calc.headcount), "People"],
+    [`${numText(calc.mealCrewDaily)} ${calc.currency}`, "Crew / day"],
+    [`${numText(calc.mealCrewPeriod)} ${calc.currency}`, "Crew / 15 days", "from the days worked once the timesheet is in"],
+  ]) + `<div class="hint-box">Crew meals = daily amount per person × number of people in the crew. Change the amount on the Details card on the left.</div>`;
+  right.appendChild(mealCard);
 
-  const uK = kart(`Üyeler · ${v.uyeler.length}`);
-  const ug = uK.querySelector(".kart-govde");
-  ug.innerHTML = v.uyeler.map((p) => kisiSatiri(p, {
-    cikar: "Ekipten çıkar", ek: p.kod === satir.ekipBasi ? "ekip başı" : "",
-  })).join("") || bosSatir("Ekipte kimse yok.");
-  ug.querySelectorAll("[data-cikar]").forEach((b) => {
-    b.onclick = () => personelAta(b.dataset.cikar, { ekip: "" }, "Ekipten çıkarıldı");
+  const memberCard = card(`Members · ${v.members.length}`);
+  const mg = memberCard.querySelector(".card-body");
+  mg.innerHTML = v.members.map((p) => personRow(p, {
+    remove: "Remove from crew", extra: p.code === row.leader ? "crew leader" : "",
+  })).join("") || emptyRow("Nobody in the crew.");
+  mg.querySelectorAll("[data-remove]").forEach((b) => {
+    b.onclick = () => assignEmployee(b.dataset.remove, { crew: "" }, "Removed from the crew");
   });
-  const adaylar = kayitlar("personel")
-    .filter((p) => p.durum !== "Ayrıldı" && p.ekip !== satir.kod)
-    .map((p) => [p._id, `${p.kod} — ${p.ad}${p.ekip ? `  (şu an ${p.ekip})` : ""}`]);
-  ug.appendChild(eklemeSatiri(adaylar, "Ekibe ekle", "Personel seçin…", (pid) =>
-    personelAta(pid, { ekip: satir.kod }, "Ekibe eklendi")));
-  sag.appendChild(uK);
+  const candidates = records("employees")
+    .filter((p) => p.status !== "Left" && p.crew !== row.code)
+    .map((p) => [p._id, `${p.code} — ${p.name}${p.crew ? `  (now ${p.crew})` : ""}`]);
+  mg.appendChild(addRow(candidates, "Add to crew", "Pick an employee…", (pid) =>
+    assignEmployee(pid, { crew: row.code }, "Added to the crew")));
+  right.appendChild(memberCard);
 
-  const zK = kart(`Ekip Zimmetleri · ${v.zimmet.length}`, `<a class="dg ufak" href="#t/zimmet">Zimmet tablosu</a>`);
-  const zg = zK.querySelector(".kart-govde");
-  zg.innerHTML = v.zimmet.map(zimmetSatiri).join("") || bosSatir("Ekibe yazılı zimmet yok.");
-  const zf = el(`<div class="hizli-form">
-    <input data-f="demirbas" placeholder="Demirbaş (ör. Hilti matkap)">
-    <select data-f="kategori"><option value="">Kategori</option>${["El Aleti", "Ölçü Cihazı", "Bilgisayar", "Telefon", "Araç", "KKD", "Diğer"].map((c) => `<option>${c}</option>`).join("")}</select>
-    <input data-f="seriNo" placeholder="Seri no">
-    <input data-f="adet" type="number" min="1" value="1" style="max-width:70px">
-    <button class="dg ufak bas">Ekibe zimmetle</button></div>`);
-  zf.querySelector("button").onclick = async () => {
-    const f = Object.fromEntries([...zf.querySelectorAll("[data-f]")].map((x) => [x.dataset.f, x.value.trim()]));
-    if (!f.demirbas) return bildir("Demirbaş adı boş", "Zimmetlenecek eşyanın adını yazın.", "hata");
+  const eqCard = card(`Crew Equipment · ${v.equipment.length}`, `<a class="btn small" href="#t/equipment">Equipment table</a>`);
+  const eg = eqCard.querySelector(".card-body");
+  eg.innerHTML = v.equipment.map(equipmentRow).join("") || emptyRow("No equipment issued to the crew.");
+  const ef = el(`<div class="quick-form">
+    <input data-f="item" placeholder="Item (e.g. Hilti drill)">
+    <select data-f="category"><option value="">Category</option>${["Hand tool", "Measuring device", "Computer", "Phone", "Vehicle", "PPE", "Other"].map((c) => `<option>${c}</option>`).join("")}</select>
+    <input data-f="serialNo" placeholder="Serial no">
+    <input data-f="quantity" type="number" min="1" value="1" style="max-width:70px">
+    <button class="btn small primary">Issue to crew</button></div>`);
+  ef.querySelector("button").onclick = async () => {
+    const f = Object.fromEntries([...ef.querySelectorAll("[data-f]")].map((x) => [x.dataset.f, x.value.trim()]));
+    if (!f.item) return toast("Item name is empty", "Type the name of the item to issue.", "error");
     try {
-      await api("/tablo/zimmet", { method: "POST", body: JSON.stringify({
-        ...f, sahipTuru: "Ekip", ekipKod: satir.kod, teslimTarihi: bugunMetni(), durum: "Zimmetli",
+      await api("/table/equipment", { method: "POST", body: JSON.stringify({
+        ...f, ownerType: "Crew", crewCode: row.code, issuedDate: todayText(), status: "Issued",
       }) });
-      bildir("Ekibe zimmetlendi", f.demirbas, "iyi");
-      await durumYukle(); await yonlendir();
-    } catch (e) { hataBildir(e); }
+      toast("Issued to the crew", f.item, "good");
+      await loadStatus(); await route();
+    } catch (e) { toastError(e); }
   };
-  zg.appendChild(zf);
-  sag.appendChild(zK);
+  eg.appendChild(ef);
+  right.appendChild(eqCard);
 
-  const kK = kart("Üyelerin Kişisel Zimmetleri");
-  kK.querySelector(".kart-govde").innerHTML = v.kisiselZimmet.map(zimmetSatiri).join("") || bosSatir("Kişisel zimmet yok.");
-  sag.appendChild(kK);
+  const personalCard = card("Members' Personal Equipment");
+  personalCard.querySelector(".card-body").innerHTML = v.personalEquipment.map(equipmentRow).join("") || emptyRow("No personal equipment.");
+  right.appendChild(personalCard);
 }
 
-function projeDetay(sag, v) {
-  const { satir, maliyet } = v;
+function projectDetail(right, v) {
+  const { row, cost } = v;
 
-  const mK = kart("Maliyet Özeti");
-  mK.querySelector(".kart-govde").innerHTML = metrikler([
-    [toplamMetni(maliyet.yemekGunluk), "Yemek / gün"],
-    [toplamMetni(maliyet.kiraAylik), "Kira payı / ay", "kişi başı paylardan"],
-    [toplamMetni(maliyet.maasAylik), "Aylık maaşlar / ay"],
-    [String(maliyet.saatlikKisi), "Saatlik çalışan", "maliyeti puantajla hesaplanacak"],
+  const costCard = card("Cost Summary");
+  costCard.querySelector(".card-body").innerHTML = metrics([
+    [totalText(cost.mealDaily), "Meals / day"],
+    [totalText(cost.rentMonthly), "Rent share / month", "from per-person shares"],
+    [totalText(cost.salaryMonthly), "Monthly salaries / month"],
+    [String(cost.hourlyCount), "Hourly workers", "cost comes from the timesheets"],
   ]);
-  sag.appendChild(mK);
+  right.appendChild(costCard);
 
-  const eK = kart(`Ekipler · ${v.ekipler.length}`);
-  const eg = eK.querySelector(".kart-govde");
-  for (const e of v.ekipler) {
-    const blok = el(`<div class="ekip-blok">
-      <div class="ekip-bas">
-        <a class="kod" href="#d/ekip/${e._id}">${kacir(e.kod)}</a><b>${kacir(e.ad)}</b>
-        <span class="mt">${e.hesap.kisiSayisi} kişi · yemek ${kacir(e.yemekEkipGunluk)}/gün</span>
-        <button class="dg ufak tehlike" data-cikar>Projeden çıkar</button></div>
-      ${e.uyeler.map((p) => kisiSatiri(p)).join("") || bosSatir("Ekipte kimse yok.")}
-      ${e.zimmet.length || e.kisiselZimmet.length ? `<div class="alt-baslik">Zimmetler</div>${[...e.zimmet, ...e.kisiselZimmet].map(zimmetSatiri).join("")}` : ""}
+  const crewCard = card(`Crews · ${v.crews.length}`);
+  const cg = crewCard.querySelector(".card-body");
+  for (const c of v.crews) {
+    const block = el(`<div class="crew-block">
+      <div class="crew-head">
+        <a class="code" href="#d/crews/${c._id}">${esc(c.code)}</a><b>${esc(c.name)}</b>
+        <span class="meta">${plural(c.calc.headcount, "person", "people")} · meals ${esc(c.mealCrewDaily)}/day</span>
+        <button class="btn small danger" data-remove>Remove from project</button></div>
+      ${c.members.map((p) => personRow(p)).join("") || emptyRow("Nobody in the crew.")}
+      ${c.equipment.length || c.personalEquipment.length ? `<div class="subhead">Equipment</div>${[...c.equipment, ...c.personalEquipment].map(equipmentRow).join("")}` : ""}
     </div>`);
-    blok.querySelector("[data-cikar]").onclick = async () => {
+    block.querySelector("[data-remove]").onclick = async () => {
       try {
-        await api(`/tablo/ekip/${e._id}`, { method: "PUT", body: JSON.stringify({ proje: "" }) });
-        bildir("Ekip projeden çıkarıldı", e.ad, "iyi"); await yonlendir();
-      } catch (er) { hataBildir(er); }
+        await api(`/table/crews/${c._id}`, { method: "PUT", body: JSON.stringify({ project: "" }) });
+        toast("Crew removed from the project", c.name, "good"); await route();
+      } catch (er) { toastError(er); }
     };
-    eg.appendChild(blok);
+    cg.appendChild(block);
   }
-  if (!v.ekipler.length) eg.innerHTML = bosSatir("Bu projeye atanmış ekip yok.");
-  const adaylar = kayitlar("ekip").filter((e) => e.proje !== satir.kod && e.durum !== "Pasif")
-    .map((e) => [e._id, `${e.kod} — ${e.ad}${e.proje ? `  (şu an ${e.proje})` : ""}`]);
-  eg.appendChild(eklemeSatiri(adaylar, "Projeye ata", "Ekip seçin…", async (eid) => {
+  if (!v.crews.length) cg.innerHTML = emptyRow("No crews assigned to this project.");
+  const candidates = records("crews").filter((c) => c.project !== row.code && c.status !== "Inactive")
+    .map((c) => [c._id, `${c.code} — ${c.name}${c.project ? `  (now ${c.project})` : ""}`]);
+  cg.appendChild(addRow(candidates, "Assign to project", "Pick a crew…", async (cid) => {
     try {
-      await api(`/tablo/ekip/${eid}`, { method: "PUT", body: JSON.stringify({ proje: satir.kod }) });
-      bildir("Ekip projeye atandı", "", "iyi"); await yonlendir();
-    } catch (e) { hataBildir(e); }
+      await api(`/table/crews/${cid}`, { method: "PUT", body: JSON.stringify({ project: row.code }) });
+      toast("Crew assigned to the project", "", "good"); await route();
+    } catch (e) { toastError(e); }
   }));
-  sag.appendChild(eK);
+  right.appendChild(crewCard);
 
-  const vK = kart(`Evler · ${v.evler.length}`);
-  vK.querySelector(".kart-govde").innerHTML = v.evler.map((ev) => `<div class="ekip-blok">
-      <div class="ekip-bas"><a class="kod" href="#d/ev/${ev._id}">${kacir(ev.kod)}</a><b>${kacir(ev.ad)}</b>
-        <span class="mt">${kacir(ev.doluluk)} · kişi başı ${kacir(ev.kisiBasiKira)}</span></div>
-      ${ev.sakinler.map((p) => kisiSatiri(p)).join("") || bosSatir("Evde kimse kalmıyor.")}</div>`).join("")
-    || bosSatir("Bu projeye bağlı ev yok. Ev tablosunda Proje alanını seçin.");
-  sag.appendChild(vK);
+  const houseCard = card(`Houses · ${v.houses.length}`);
+  houseCard.querySelector(".card-body").innerHTML = v.houses.map((h) => `<div class="crew-block">
+      <div class="crew-head"><a class="code" href="#d/houses/${h._id}">${esc(h.code)}</a><b>${esc(h.name)}</b>
+        <span class="meta">${esc(h.occupancy)} · per person ${esc(h.rentPerPerson)}</span></div>
+      ${h.residents.map((p) => personRow(p)).join("") || emptyRow("Nobody lives in the house.")}</div>`).join("")
+    || emptyRow("No house linked to this project. Pick the Project field in the Houses table.");
+  right.appendChild(houseCard);
 }
 
-function evDetay(sag, v) {
-  const { satir, hesap } = v;
+function houseDetail(right, v) {
+  const { row, calc } = v;
 
-  const dK = kart("Doluluk ve Kira");
-  dK.querySelector(".kart-govde").innerHTML = metrikler([
-    [`${hesap.kisiSayisi} / ${hesap.yatak || "?"}`, "Kişi / yatak"],
-    [hesap.kira ? `${sayiMetni(hesap.kira)} ${hesap.paraBirimi}` : "—", "Aylık kira"],
-    [hesap.kisiBasiKira ? `${sayiMetni(hesap.kisiBasiKira)} ${hesap.paraBirimi}` : "—", "Kişi başı / ay"],
-  ]) + (hesap.asim ? `<div class="o-not">Kapasite aşıldı: ${hesap.kisiSayisi} kişi kalıyor, yatak sayısı ${hesap.yatak}.</div>` : "");
-  sag.appendChild(dK);
+  const occCard = card("Occupancy and Rent");
+  occCard.querySelector(".card-body").innerHTML = metrics([
+    [`${calc.headcount} / ${calc.beds || "?"}`, "People / beds"],
+    [calc.rent ? `${numText(calc.rent)} ${calc.currency}` : "—", "Monthly rent"],
+    [calc.rentPerPerson ? `${numText(calc.rentPerPerson)} ${calc.currency}` : "—", "Per person / month"],
+  ]) + (calc.overCapacity ? `<div class="sugg-note">Over capacity: ${plural(calc.headcount, "person", "people")} live here and there are ${calc.beds} beds.</div>` : "");
+  right.appendChild(occCard);
 
-  const kK = kart(`Kalanlar · ${v.sakinler.length}`);
-  const kg = kK.querySelector(".kart-govde");
-  kg.innerHTML = v.sakinler.map((p) => kisiSatiri(p, { cikar: "Evden çıkar", ek: p.ekip || "ekipsiz" })).join("")
-    || bosSatir("Evde kimse kalmıyor.");
-  kg.querySelectorAll("[data-cikar]").forEach((b) => {
-    b.onclick = () => personelAta(b.dataset.cikar, { ev: "" }, "Evden çıkarıldı");
+  const resCard = card(`Residents · ${v.residents.length}`);
+  const rg = resCard.querySelector(".card-body");
+  rg.innerHTML = v.residents.map((p) => personRow(p, { remove: "Move out", extra: p.crew || "no crew" })).join("")
+    || emptyRow("Nobody lives in the house.");
+  rg.querySelectorAll("[data-remove]").forEach((b) => {
+    b.onclick = () => assignEmployee(b.dataset.remove, { house: "" }, "Moved out of the house");
   });
-  const adaylar = kayitlar("personel").filter((p) => p.durum !== "Ayrıldı" && p.ev !== satir.kod)
-    .map((p) => [p._id, `${p.kod} — ${p.ad}${p.ev ? `  (şu an ${p.ev})` : ""}`]);
-  kg.appendChild(eklemeSatiri(adaylar, "Eve yerleştir", "Personel seçin…", async (pid) => {
-    if (hesap.yatak && hesap.kisiSayisi >= hesap.yatak) {
-      const ok = await onay("Ev dolu", `${satir.ad} evinde ${hesap.yatak} yatak var ve hepsi dolu. Yine de yerleştirilsin mi?`, "Yine de yerleştir");
+  const candidates = records("employees").filter((p) => p.status !== "Left" && p.house !== row.code)
+    .map((p) => [p._id, `${p.code} — ${p.name}${p.house ? `  (now ${p.house})` : ""}`]);
+  rg.appendChild(addRow(candidates, "Move in", "Pick an employee…", async (pid) => {
+    if (calc.beds && calc.headcount >= calc.beds) {
+      const ok = await confirmBox("The house is full", `${row.name} has ${calc.beds} beds and all are taken. Move the person in anyway?`, "Move in anyway");
       if (!ok) return;
     }
-    personelAta(pid, { ev: satir.kod }, "Eve yerleştirildi");
+    assignEmployee(pid, { house: row.code }, "Moved into the house");
   }));
-  sag.appendChild(kK);
+  right.appendChild(resCard);
 
-  const pK = kart("Kira Payları");
-  pK.querySelector(".kart-govde").innerHTML = v.kiraPaylari.length
-    ? `<table class="mini"><thead><tr><th>Proje</th><th>Kişi</th><th>Aylık pay</th></tr></thead><tbody>
-        ${v.kiraPaylari.map((p) => `<tr><td>${kacir(p.ad)}</td><td>${p.kisi}</td><td>${sayiMetni(p.tutar)} ${kacir(hesap.paraBirimi)}</td></tr>`).join("")}
-       </tbody></table><div class="ipucu-kutu">Kira, evde kalan kişi sayısına bölünür ve her kişinin projesine (ekibinin projesi; ekibi yoksa evin projesi) yazılır.</div>`
-    : bosSatir("Evde kimse kalmadığı için pay yok.");
-  sag.appendChild(pK);
+  const shareCard = card("Rent Shares");
+  shareCard.querySelector(".card-body").innerHTML = v.rentShares.length
+    ? `<table class="mini"><thead><tr><th>Project</th><th>People</th><th>Monthly share</th></tr></thead><tbody>
+        ${v.rentShares.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.people}</td><td>${numText(p.amount)} ${esc(calc.currency)}</td></tr>`).join("")}
+       </tbody></table><div class="hint-box">The rent is split by the number of people living in the house and charged to each person's project (their crew's project; the house's project if they have no crew).</div>`
+    : emptyRow("Nobody lives in the house, so there are no shares.");
+  right.appendChild(shareCard);
 }
 
-/* ---------------- ÇALIŞANIN GÖZÜNDEN ---------------- */
+/* ---------------- EMPLOYEE'S VIEW ---------------- */
 
-const para = (n, pb) => `${sayiMetni(n)} ${pb}`;
-const gunEkle = (t, n) => { const d = new Date(`${t}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-const cgDonemKisa = (d) => d.ad.replace(/ · \d\. Yarı \((.*)\)$/, " · $1");
-const cgGunDisi = (g) => g.girisOncesi || g.kontratDisi;
+const money = (n, cur) => `${numText(n)} ${cur}`;
+const addDays = (t, n) => { const d = new Date(`${t}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const evPeriodShort = (d) => d.name.replace(/ · \d(st|nd) half \((.*)\)$/, " · $2");
+const evDayOutside = (g) => g.beforeStart || g.outsideContract;
 
 /**
- * Sayfadaki seçim, adres çubuğundan okunur:
- *   "2026-10-1"               tek dönem
- *   "2026-09-2,2026-10-1"     birden çok dönem (aralarında boşluk olabilir)
- *   "2026-10-03..2026-10-20"  gün gün tarih aralığı (dönem sınırını aşabilir)
- * Döner: seçilen dönemler (eskiden yeniye) ve gösterilecek ilk / son gün.
+ * The selection on the page is read from the address bar:
+ *   "2026-10-1"               one period
+ *   "2026-09-2,2026-10-1"     several periods (there may be gaps between them)
+ *   "2026-10-03..2026-10-20"  a day-by-day date range (may cross period boundaries)
+ * Returns: the chosen periods (oldest first) and the first / last day to show.
  */
-const CG_EN_FAZLA = 2;
-function cgSecimCoz(v, sec) {
-  const tum = [...v.donemler].reverse();
-  const ilk = (d) => d.gunler[0].gun, son = (d) => d.gunler.at(-1).gun;
-  const m = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(sec || "");
-  // En fazla CG_EN_FAZLA dönem gösterilir; fazlası seçilirse en yeni dönemler kalır.
-  const kirp = (donemler) => donemler.slice(-CG_EN_FAZLA);
+const EV_MAX = 2;
+function evParseSelection(v, sel) {
+  const all = [...v.periods].reverse();
+  const first = (d) => d.days[0].day, last = (d) => d.days.at(-1).day;
+  const m = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(sel || "");
+  // At most EV_MAX periods are shown; if more are chosen, the newest ones stay.
+  const trim = (periods) => periods.slice(-EV_MAX);
   if (m) {
-    const [bas, bit] = m[1] <= m[2] ? [m[1], m[2]] : [m[2], m[1]];
-    const hepsi = tum.filter((d) => ilk(d) <= bit && son(d) >= bas), donemler = kirp(hepsi);
-    const kirpildi = hepsi.length > donemler.length;
-    return { aralik: true, bas: kirpildi && ilk(donemler[0]) > bas ? ilk(donemler[0]) : bas, bit, donemler, kirpildi };
+    const [from, to] = m[1] <= m[2] ? [m[1], m[2]] : [m[2], m[1]];
+    const every = all.filter((d) => first(d) <= to && last(d) >= from), periods = trim(every);
+    const trimmed = every.length > periods.length;
+    return { range: true, from: trimmed && first(periods[0]) > from ? first(periods[0]) : from, to, periods, trimmed };
   }
-  const liste = String(sec || "").split(",");
-  const hepsi = tum.filter((d) => liste.includes(d.donem));
-  let donemler = kirp(hepsi);
-  if (!donemler.length) donemler = tum.slice(-1);
-  return { aralik: false, bas: donemler[0] ? ilk(donemler[0]) : "", bit: donemler.length ? son(donemler.at(-1)) : "", donemler,
-    kirpildi: hepsi.length > donemler.length };
+  const list = String(sel || "").split(",");
+  const every = all.filter((d) => list.includes(d.period));
+  let periods = trim(every);
+  if (!periods.length) periods = all.slice(-1);
+  return { range: false, from: periods[0] ? first(periods[0]) : "", to: periods.length ? last(periods.at(-1)) : "", periods,
+    trimmed: every.length > periods.length };
 }
 
-/** Seçilen günlerin saat ve gün sayıları (işe giriş öncesi ve çalışma dönemi dışı günler sayılmaz). */
-function cgGunToplam(gunler) {
-  const t = { gun: 0, saat: 0, normal: 0, mesai: 0, gelmedi: 0, izin: 0, rapor: 0 };
-  for (const g of gunler) {
-    if (cgGunDisi(g)) continue;
-    if (/^\d/.test(g.deger) && Number(g.deger) > 0) t.gun += 1;
-    t.normal += g.n || 0; t.mesai += g.m || 0;
-    if (g.gelmedi) t.gelmedi += 1; else if (g.deger === "İ") t.izin += 1; else if (g.deger === "R") t.rapor += 1;
+/** Hour and day counts of the chosen days (days before starting work and outside the employment period are not counted). */
+function evDayTotals(days) {
+  const t = { days: 0, hours: 0, normal: 0, overtime: 0, absent: 0, leave: 0, sick: 0 };
+  for (const g of days) {
+    if (evDayOutside(g)) continue;
+    if (/^\d/.test(g.value) && Number(g.value) > 0) t.days += 1;
+    t.normal += g.n || 0; t.overtime += g.m || 0;
+    if (g.absent) t.absent += 1; else if (g.value === "L") t.leave += 1; else if (g.value === "S") t.sick += 1;
   }
-  t.saat = t.normal + t.mesai;
+  t.hours = t.normal + t.overtime;
   return t;
 }
 
 /**
- * Çalışanın göreceği sayfa: kendi puantajı, hakedişi, kesinti nedenleri ve ödemeleri. Sadece okunur.
- * En fazla iki dönem ya da gün gün bir tarih aralığı seçilir. Yazdırınca (PDF) puantaj, hakediş hesabı ve o ayın yemek parası
- * ödemeleri çıkar; ücret, ev, çalışma dönemleri ve belgeler sadece ekranda kalır.
+ * The page the employee would see: their own timesheet, earnings, reasons for deductions and payments. Read only.
+ * At most two periods or a day-by-day date range can be chosen. Printing (PDF) gives the timesheet, the earnings
+ * calculation and that month's meal allowance payments; pay, house, employment periods and documents stay on screen only.
  */
-async function calisanCiz(kod, sec) {
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
+async function renderEmployeeView(code, sel) {
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
   let v;
-  try { v = await api(`/calisan/${encodeURIComponent(kod)}`); }
-  catch (e) { ana.innerHTML = `<div class="bos"><div class="bs">Sayfa açılamadı</div><p>${kacir(e.message)}</p></div>`; return; }
-  const k = v.kisi;
-  const secim = cgSecimCoz(v, sec);
-  const git = (s) => { location.hash = `#calisan/${encodeURIComponent(k.kod)}/${s}`; };
+  try { v = await api(`/employee-view/${encodeURIComponent(code)}`); }
+  catch (e) { main.innerHTML = `<div class="empty"><div class="big">Could not open the page</div><p>${esc(e.message)}</p></div>`; return; }
+  const k = v.person;
+  const selection = evParseSelection(v, sel);
+  const go = (s) => { location.hash = `#employee/${encodeURIComponent(k.code)}/${s}`; };
 
-  ana.innerHTML = "";
-  const bas = el(`<div class="sayfa-bas cg-arac"><div>
-      <a class="geri" href="#d/personel/${kacir(k._id)}">← ${kacir(k.ad)} · kişi sayfası</a>
-      <h2>Çalışanın gözünden</h2>
-      <p>${kacir(k.ad)} bu sayfayı görür: kendi puantajı, hakedişi, kesinti nedenleri ve ödemeleri. Başka kimsenin bilgisi ve yönetici notları yer almaz.
-        En fazla iki dönem gösterilir. Yazdırınca ya da PDF alınca puantaj, hakediş hesabı ve o ayın yemek parası ödemeleri çıkar.</p></div>
-    <div class="bas-arac"><button class="dg bas" data-yazdir ${secim.donemler.length ? "" : "disabled"}>Yazdır / PDF</button></div></div>`);
-  ana.appendChild(bas);
-  bas.querySelector("[data-yazdir]").onclick = () => {
-    // Tarayıcı PDF dosyasına sayfa başlığını ad olarak önerir.
-    const eski = document.title;
-    document.title = `Puantaj ve hakediş ${k.ad} ${secim.bas}_${secim.bit}`;
-    window.addEventListener("afterprint", () => { document.title = eski; }, { once: true });
+  main.innerHTML = "";
+  const head = el(`<div class="page-head ev-tools"><div>
+      <a class="back" href="#d/employees/${esc(k._id)}">← ${esc(k.name)} · person page</a>
+      <h2>Employee's view</h2>
+      <p>${esc(k.name)} sees this page: their own timesheet, earnings, reasons for deductions and payments. Nobody else's information and no manager notes appear.
+        At most two periods are shown. Printing or saving as PDF gives the timesheet, the earnings calculation and that month's meal allowance payments.</p></div>
+    <div class="head-tools"><button class="btn primary" data-print ${selection.periods.length ? "" : "disabled"}>Print / PDF</button></div></div>`);
+  main.appendChild(head);
+  head.querySelector("[data-print]").onclick = () => {
+    // The browser suggests the page title as the PDF file name.
+    const old = document.title;
+    document.title = `Timesheet and earnings ${k.name} ${selection.from}_${selection.to}`;
+    window.addEventListener("afterprint", () => { document.title = old; }, { once: true });
     window.print();
   };
 
-  if (v.donemler.length) {
-    const secili = new Set(secim.donemler.map((d) => d.donem));
-    const ilkGun = v.donemler.at(-1).gunler[0].gun, sonGun = v.donemler[0].gunler.at(-1).gun;
-    const cubuk = el(`<div class="kart cg-secim">
-      <div class="cg-satir"><span class="kucuk-et">Dönemler</span>
-        <div class="cg-cipler">${v.donemler.map((d) => `<button class="cg-cip ${secili.has(d.donem) ? "aktif" : ""}" data-d="${d.donem}"
-          title="${kacir(d.ad)} · tıklayınca seçime eklenir ya da çıkar">${kacir(cgDonemKisa(d))}</button>`).join("")}</div></div>
-      <div class="cg-satir"><span class="kucuk-et">Tarih aralığı</span>
-        <input type="date" data-t="bas" value="${secim.bas}" min="${ilkGun}" max="${sonGun}">
-        <span class="soluk">–</span>
-        <input type="date" data-t="bit" value="${secim.bit}" min="${ilkGun}" max="${sonGun}">
-        <button class="dg ufak" data-h="ay">Bu ay</button>
-        <button class="dg ufak" data-h="son">Son ${CG_EN_FAZLA} dönem</button>
-        <span class="cg-secim-ozet">${secim.donemler.length} dönem${secim.aralik ? " · gün aralığı" : ""}${secim.kirpildi
-          ? ` · <span class="kotu">en fazla ${CG_EN_FAZLA} dönem gösterilir</span>` : ""}</span></div></div>`);
-    ana.appendChild(cubuk);
-    const sira = new Map(v.donemler.map((d, i) => [d.donem, i]));
-    cubuk.querySelectorAll("[data-d]").forEach((b) => b.onclick = () => {
-      const tik = b.dataset.d, yeni = new Set(secili);
-      if (yeni.has(tik)) { if (yeni.size > 1) yeni.delete(tik); } else yeni.add(tik);
-      // Sınır aşılırsa tıklanan kalır, ona en uzak dönem çıkar.
-      const uzaklik = (x) => Math.abs(sira.get(x) - sira.get(tik));
-      while (yeni.size > CG_EN_FAZLA) yeni.delete([...yeni].filter((x) => x !== tik).sort((a, b2) => uzaklik(b2) - uzaklik(a))[0]);
-      git([...yeni].sort().join(","));
+  if (v.periods.length) {
+    const chosen = new Set(selection.periods.map((d) => d.period));
+    const firstDay = v.periods.at(-1).days[0].day, lastDay = v.periods[0].days.at(-1).day;
+    const bar = el(`<div class="card ev-pick">
+      <div class="ev-row"><span class="small-label">Periods</span>
+        <div class="ev-chips">${v.periods.map((d) => `<button class="ev-chip ${chosen.has(d.period) ? "active" : ""}" data-d="${d.period}"
+          title="${esc(d.name)} · click to add to or remove from the selection">${esc(evPeriodShort(d))}</button>`).join("")}</div></div>
+      <div class="ev-row"><span class="small-label">Date range</span>
+        <input type="date" data-t="from" value="${selection.from}" min="${firstDay}" max="${lastDay}">
+        <span class="muted">–</span>
+        <input type="date" data-t="to" value="${selection.to}" min="${firstDay}" max="${lastDay}">
+        <button class="btn small" data-h="month">This month</button>
+        <button class="btn small" data-h="last">Last ${plural(EV_MAX, "period")}</button>
+        <span class="ev-pick-sum">${plural(selection.periods.length, "period")}${selection.range ? " · day range" : ""}${selection.trimmed
+          ? ` · <span class="bad">at most ${plural(EV_MAX, "period")} are shown</span>` : ""}</span></div></div>`);
+    main.appendChild(bar);
+    const order = new Map(v.periods.map((d, i) => [d.period, i]));
+    bar.querySelectorAll("[data-d]").forEach((b) => b.onclick = () => {
+      const tick = b.dataset.d, next = new Set(chosen);
+      if (next.has(tick)) { if (next.size > 1) next.delete(tick); } else next.add(tick);
+      // Over the limit: the clicked one stays and the period furthest from it is dropped.
+      const distance = (x) => Math.abs(order.get(x) - order.get(tick));
+      while (next.size > EV_MAX) next.delete([...next].filter((x) => x !== tick).sort((a, b2) => distance(b2) - distance(a))[0]);
+      go([...next].sort().join(","));
     });
-    cubuk.querySelectorAll("[data-t]").forEach((inp) => inp.onchange = () => {
-      const b = cubuk.querySelector('[data-t="bas"]').value, s = cubuk.querySelector('[data-t="bit"]').value;
-      if (b && s) git(`${b}..${s}`);
+    bar.querySelectorAll("[data-t]").forEach((inp) => inp.onchange = () => {
+      const b = bar.querySelector('[data-t="from"]').value, s = bar.querySelector('[data-t="to"]').value;
+      if (b && s) go(`${b}..${s}`);
     });
-    cubuk.querySelector('[data-h="ay"]').onclick = () => {
-      const ay = bugunStr().slice(0, 7);
-      git(`${ay}-01..${gunEkle(`${gunEkle(`${ay}-01`, 32).slice(0, 7)}-01`, -1)}`);
+    bar.querySelector('[data-h="month"]').onclick = () => {
+      const month = todayStr().slice(0, 7);
+      go(`${month}-01..${addDays(`${addDays(`${month}-01`, 32).slice(0, 7)}-01`, -1)}`);
     };
-    cubuk.querySelector('[data-h="son"]').onclick = () => git(v.donemler.slice(0, CG_EN_FAZLA).map((d) => d.donem).sort().join(","));
+    bar.querySelector('[data-h="last"]').onclick = () => go(v.periods.slice(0, EV_MAX).map((d) => d.period).sort().join(","));
   }
 
-  const kagit = el(`<div class="kart cg-kagit"></div>`);
-  ana.appendChild(kagit);
+  const paper = el(`<div class="card ev-paper"></div>`);
+  main.appendChild(paper);
 
-  // Kimlik ve yerleşim. Ücret, ev ve yemek ekranda kalır; yazdırılan puantajda çıkmaz.
-  const ekipMetni = v.ekip ? `${v.ekip.ad}${v.proje ? ` · ${v.proje.ad}` : ""}` : "Ekip atanmamış";
-  const evMetni = v.ev ? `${v.ev.ad}${v.ev.adres ? ` · ${v.ev.adres}` : ""} · ${v.ev.kisi} kişi` : "Ev atanmamış";
-  const ucret = k.odemeTuru && k.ucret
-    ? `${k.odemeTuru} · ${para(k.ucret, k.paraBirimi)}${k.odemeTuru === "Saatlik" ? " / saat" : " / ay"}` : "—";
-  kagit.appendChild(el(`<div class="cg-bas">
-    <div><div class="cg-ust">ACME MÜHENDİSLİK · çalışan sayfası</div>
-      <div class="cg-ad">${kacir(k.ad)}</div>
-      <div class="soluk">${kacir([k.kod, k.gorev, k.iseGiris ? `işe giriş ${tarihKisa(k.iseGiris)}` : ""].filter(Boolean).join(" · "))}</div></div>
-    <div class="cg-bilgi">
-      <div class="cg-ekran"><span>Ücret</span><b>${kacir(ucret)}</b></div>
-      <div><span>Ekip ve proje</span><b>${kacir(ekipMetni)}</b></div>
-      <div class="cg-ekran"><span>Kaldığınız ev</span><b>${kacir(evMetni)}</b>${v.ev?.kisiBasiKira
-        ? `<small>Kira payınız: ${kacir(para(v.ev.kisiBasiKira, v.ev.paraBirimi))} / ay · ${kacir(para(v.ev.kisiBasiGunluk, v.ev.paraBirimi))} / gün</small>` : ""}</div>
-      <div class="cg-ekran"><span>Yemek parası</span><b>${v.ekip?.yemekGunluk ? `${kacir(para(v.ekip.yemekGunluk, v.ekip.yemekPB))} / gün` : "—"}</b>${v.ekip?.yemekGunluk
-        ? `<small>dönem başında peşin verilir</small>` : ""}</div>
-      ${secim.donemler.length ? `<div class="cg-baski"><span>Puantaj aralığı</span><b>${tarihKisa(secim.bas)} – ${tarihKisa(secim.bit)}</b></div>` : ""}
+  // Identity and placement. Pay, house and meals stay on screen; they are not printed with the timesheet.
+  const crewText = v.crew ? `${v.crew.name}${v.project ? ` · ${v.project.name}` : ""}` : "No crew assigned";
+  const houseText = v.house ? `${v.house.name}${v.house.address ? ` · ${v.house.address}` : ""} · ${plural(v.house.people, "person", "people")}` : "No house assigned";
+  const pay = k.payType && k.pay
+    ? `${k.payType} · ${money(k.pay, k.currency)}${k.payType === "Hourly" ? " / hour" : " / month"}` : "—";
+  paper.appendChild(el(`<div class="ev-head">
+    <div><div class="ev-kicker">ACME ENGINEERING · employee page</div>
+      <div class="ev-name">${esc(k.name)}</div>
+      <div class="muted">${esc([k.code, k.role, k.startDate ? `started ${shortDate(k.startDate)}` : ""].filter(Boolean).join(" · "))}</div></div>
+    <div class="ev-info">
+      <div class="ev-screen"><span>Pay</span><b>${esc(pay)}</b></div>
+      <div><span>Crew and project</span><b>${esc(crewText)}</b></div>
+      <div class="ev-screen"><span>Your house</span><b>${esc(houseText)}</b>${v.house?.rentPerPerson
+        ? `<small>Your rent share: ${esc(money(v.house.rentPerPerson, v.house.currency))} / month · ${esc(money(v.house.rentPerPersonDaily, v.house.currency))} / day</small>` : ""}</div>
+      <div class="ev-screen"><span>Meal allowance</span><b>${v.crew?.mealDaily ? `${esc(money(v.crew.mealDaily, v.crew.mealCurrency))} / day` : "—"}</b>${v.crew?.mealDaily
+        ? `<small>paid in advance at the start of the period</small>` : ""}</div>
+      ${selection.periods.length ? `<div class="ev-print"><span>Timesheet range</span><b>${shortDate(selection.from)} – ${shortDate(selection.to)}</b></div>` : ""}
     </div></div>`));
 
-  if (!secim.donemler.length) {
-    kagit.appendChild(el(`<div class="bos"><div class="bs">${v.donemler.length ? "Bu tarihlerde puantaj yok" : "Henüz puantaj yok"}</div>
-      <p>${v.donemler.length ? "Seçilen aralık hiçbir puantaj dönemine denk gelmiyor." : "Bu kişi hiçbir puantaj dönemine girmemiş."}</p></div>`));
+  if (!selection.periods.length) {
+    paper.appendChild(el(`<div class="empty"><div class="big">${v.periods.length ? "No timesheet for these dates" : "No timesheet yet"}</div>
+      <p>${v.periods.length ? "The chosen range does not fall in any timesheet period." : "This person has not been in any timesheet period."}</p></div>`));
   } else {
-    kagit.appendChild(calisanPuantajHtml(secim));
-    kagit.appendChild(calisanHakedisBolumu(secim));
+    paper.appendChild(employeeTimesheetHtml(selection));
+    paper.appendChild(employeeEarningsSection(selection));
 
-    // Ödemeler: sadece seçilen ay(lar)ın yemek parası. Maaş ödemesi burada yazılmaz; hakediş hesabı yukarıda.
-    const aylar = new Set(secim.donemler.map((d) => d.donem.slice(0, 7)));
-    const od = v.odemeler.filter((o) => o.tur === "yemek" && aylar.has(String(o.donem || "").slice(0, 7)));
-    kagit.appendChild(el(`<div class="cg-bolum"><h4>Ödemeleriniz · yemek parası</h4>
-      ${od.length ? `<table class="mini"><thead><tr><th>Ödeme günü</th><th>Ödeme</th><th style="text-align:right">Tutar</th><th>Durum</th></tr></thead><tbody>
-        ${od.map((o) => `<tr><td>${tarihKisa(o.vade)}</td><td>${kacir(o.aciklama)}</td>
-          <td style="text-align:right;white-space:nowrap">${kacir(para(o.odendi ? o.odenen : o.tutar, o.paraBirimi))}</td>
-          <td>${o.odendi ? `<span class="cg-pul iyi">Ödendi ${tarihKisa(o.odemeTarihi)}</span>` : `<span class="cg-pul">Bekliyor</span>`}</td></tr>`).join("")}
-      </tbody></table>` : `<div class="liste-bos">Bu ay için yemek parası kalemi yok.</div>`}</div>`));
+    // Payments: only the meal allowance of the chosen month(s). Salary payments are not listed here; the earnings calculation is above.
+    const months = new Set(selection.periods.map((d) => d.period.slice(0, 7)));
+    const pays = v.payments.filter((o) => o.type === "meals" && months.has(String(o.period || "").slice(0, 7)));
+    paper.appendChild(el(`<div class="ev-section"><h4>Your payments · meal allowance</h4>
+      ${pays.length ? `<table class="mini"><thead><tr><th>Due date</th><th>Payment</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead><tbody>
+        ${pays.map((o) => `<tr><td>${shortDate(o.due)}</td><td>${esc(o.description)}</td>
+          <td style="text-align:right;white-space:nowrap">${esc(money(o.paid ? o.paidAmount : o.amount, o.currency))}</td>
+          <td>${o.paid ? `<span class="ev-pill good">Paid ${shortDate(o.paidDate)}</span>` : `<span class="ev-pill">Pending</span>`}</td></tr>`).join("")}
+      </tbody></table>` : `<div class="list-empty">No meal allowance item for this month.</div>`}</div>`));
   }
 
-  if (v.calisma?.length) {
-    kagit.appendChild(el(`<div class="cg-bolum cg-ekran"><h4>Çalışma dönemleriniz</h4>
-      <table class="mini"><thead><tr><th>Tür</th><th>Proje</th><th>Başlangıç</th><th>Bitiş</th><th>Durum</th></tr></thead><tbody>
-      ${v.calisma.map((c) => `<tr><td>${kacir(c.tur)}</td><td>${kacir(c.proje || "—")}</td><td>${tarihKisa(c.baslangic)}</td>
-        <td>${c.bitis ? tarihKisa(c.bitis) : "süresiz"}</td><td><span class="cg-pul ${c.durum === "Sürüyor" ? "iyi" : ""}">${kacir(c.durum)}</span></td></tr>`).join("")}
+  if (v.work?.length) {
+    paper.appendChild(el(`<div class="ev-section ev-screen"><h4>Your employment periods</h4>
+      <table class="mini"><thead><tr><th>Type</th><th>Project</th><th>Start</th><th>End</th><th>Status</th></tr></thead><tbody>
+      ${v.work.map((c) => `<tr><td>${esc(c.type)}</td><td>${esc(c.project || "—")}</td><td>${shortDate(c.start)}</td>
+        <td>${c.end ? shortDate(c.end) : "open-ended"}</td><td><span class="ev-pill ${c.status === "Ongoing" ? "good" : ""}">${esc(c.status)}</span></td></tr>`).join("")}
       </tbody></table></div>`));
   }
 
-  if (k.belgeler.length) {
-    kagit.appendChild(el(`<div class="cg-bolum cg-ekran"><h4>Belgelerinizin bitiş tarihleri</h4><div class="cg-belgeler">
-      ${k.belgeler.map((b) => {
-        const f = gunFarki(b.bitis);
-        return `<div><span>${kacir(b.ad)}</span><b>${tarihKisa(b.bitis)}</b>${f !== null && f <= 60
-          ? `<small class="kotu">${f < 0 ? `${-f} gün geçti` : `${f} gün kaldı`}</small>` : ""}</div>`;
+  if (k.documents.length) {
+    paper.appendChild(el(`<div class="ev-section ev-screen"><h4>Expiry dates of your documents</h4><div class="ev-docs">
+      ${k.documents.map((b) => {
+        const f = daysUntil(b.expiry);
+        return `<div><span>${esc(b.name)}</span><b>${shortDate(b.expiry)}</b>${f !== null && f <= 60
+          ? `<small class="bad">${f < 0 ? `${plural(-f, "day")} overdue` : `${plural(f, "day")} left`}</small>` : ""}</div>`;
       }).join("")}</div></div>`));
   }
-  const zaman = new Date(v.olusturma).toLocaleString("tr-TR");
-  kagit.appendChild(el(`<div class="cg-alt"><span class="cg-ekran">Bu sayfa ${zaman} tarihinde hazırlandı.
-    Rakamlar dönem kapanana kadar değişebilir. Bir yanlışlık görürseniz yöneticinize bildirin.</span>
-    <span class="cg-baski">Bu sayfa ${zaman} tarihinde hazırlandı. Açık dönemlerde rakamlar dönem kapanana kadar değişebilir.</span></div>`));
+  const when = new Date(v.created).toLocaleString("en-GB");
+  paper.appendChild(el(`<div class="ev-foot"><span class="ev-screen">This page was prepared on ${when}.
+    Figures may change until the period is closed. If you see a mistake, tell your manager.</span>
+    <span class="ev-print">This page was prepared on ${when}. In open periods the figures may change until the period is closed.</span></div>`));
 }
 
-/** Gelmedi gününde ne kesildiği: ödeme türüne ve dönemin kuralına göre. */
-function gelmediKurali(d) {
-  const saatlik = d.odemeTuru === "Saatlik";
-  if (d.kural === 1) return saatlik ? "Çalışılmayan saat ödenmez." : "Eksik kalan saatler maaştan kesilir.";
-  return saatlik
-    ? "Çalışılmayan saat zaten ödenmez; gelmediğiniz her gün için ayrıca kira payı ve yemek parası kesilir."
-    : "Gelmediğiniz her gün için o günün maaşı, kira payı ve yemek parası kesilir.";
+/** What is deducted for a day absent: depends on the pay type and the period's rule. */
+function absentRule(d) {
+  const hourly = d.payType === "Hourly";
+  if (d.rule === 1) return hourly ? "Hours not worked are not paid." : "Missing hours are deducted from the salary.";
+  return hourly
+    ? "Hours not worked are not paid anyway; for each day you were absent the rent share and the meal allowance are deducted as well."
+    : "For each day you were absent, that day's salary, the rent share and the meal allowance are deducted.";
 }
 
-/** Seçilen günlerin puantajı: toplamlar ve dönem dönem gün ızgarası. */
-function calisanPuantajHtml(secim) {
-  const parcalar = secim.donemler.map((d) => ({ d, gunler: d.gunler.filter((g) => g.gun >= secim.bas && g.gun <= secim.bit) }));
-  const t = cgGunToplam(parcalar.flatMap((x) => x.gunler));
-  const disiVar = parcalar.some((x) => x.gunler.some(cgGunDisi));
+/** The timesheet of the chosen days: totals and a day grid per period. */
+function employeeTimesheetHtml(selection) {
+  const parts = selection.periods.map((d) => ({ d, days: d.days.filter((g) => g.day >= selection.from && g.day <= selection.to) }));
+  const t = evDayTotals(parts.flatMap((x) => x.days));
+  const anyOutside = parts.some((x) => x.days.some(evDayOutside));
 
-  const gunHtml = (g) => {
-    const v = g.deger === "İ" ? "v-izin" : g.deger === "R" ? "v-rapor" : g.gelmedi ? "v-gelmedi" : "";
-    const disi = cgGunDisi(g);
-    const deger = disi ? "" : g.gelmedi ? "–" : g.deger;
-    const ne = g.girisOncesi ? "işe girişten önce" : g.kontratDisi ? "çalışma dönemi dışında" : g.gelmedi ? "gelmedi"
-      : g.deger === "İ" ? "izin" : g.deger === "R" ? "rapor" : /^\d/.test(g.deger) ? `${g.deger} saat` : "";
-    const ipucu = [tarihUzun(g.gun), ne, g.baskaEkip ? `${g.baskaEkip} ekibinde` : "",
-      g.tip === "mesai" ? "mesai günü" : g.tip === "tatil" ? "tatil" : ""].filter(Boolean).join(" · ");
-    return `<div class="cg-gun t-${g.tip} ${v} ${disi ? "giris" : ""}" title="${kacir(ipucu)}">
-      <span>${g.gun.slice(8)} ${kacir(g.hg)}</span><b>${kacir(deger) || "&nbsp;"}</b>${g.baskaEkip ? `<i>${kacir(g.baskaEkip)}</i>` : ""}</div>`;
+  const dayHtml = (g) => {
+    const v = g.value === "L" ? "v-leave" : g.value === "S" ? "v-sick" : g.absent ? "v-absent" : "";
+    const outside = evDayOutside(g);
+    const value = outside ? "" : g.absent ? "–" : g.value;
+    const what = g.beforeStart ? "before starting work" : g.outsideContract ? "outside the employment period" : g.absent ? "absent"
+      : g.value === "L" ? "leave" : g.value === "S" ? "sick" : /^\d/.test(g.value) ? `${plural(g.value, "hour")}` : "";
+    const hint = [longDate(g.day), what, g.otherCrew ? `in crew ${g.otherCrew}` : "",
+      g.type === "overtime" ? "overtime day" : g.type === "holiday" ? "holiday" : ""].filter(Boolean).join(" · ");
+    return `<div class="ev-day t-${g.type} ${v} ${outside ? "pre" : ""}" title="${esc(hint)}">
+      <span>${g.day.slice(8)} ${esc(g.wd)}</span><b>${esc(value) || "&nbsp;"}</b>${g.otherCrew ? `<i>${esc(g.otherCrew)}</i>` : ""}</div>`;
   };
 
-  const donemHtml = ({ d, gunler }) => {
-    const dt = cgGunToplam(gunler);
-    const gelmedi = gunler.filter((g) => g.gelmedi);
-    const kismi = gunler.length < d.gunler.length;
-    return `<div class="cg-pt-donem">
-      <div class="cg-pt-bas"><b>${kacir(cgDonemKisa(d))}</b>
-        <span>${d.durum === "kapali" ? "dönem kapandı" : "dönem açık"}${kismi ? ` · ${gunler.length}/${d.gunler.length} gün` : ""}</span>
-        <span class="cg-pt-t">${sayiMetni(dt.saat)} saat · ${dt.gun} gün${dt.mesai ? ` · ${sayiMetni(dt.mesai)} mesai` : ""}${dt.gelmedi ? ` · <em class="kotu">${dt.gelmedi} gelmedi</em>` : ""}</span></div>
-      <div class="cg-gunler">${gunler.map(gunHtml).join("")}</div>
-      ${gelmedi.length ? `<div class="cg-not">Gelmediğiniz günler: <b>${gelmedi.map((g) => kacir(tarihUzun(g.gun))).join(", ")}</b>.
-        <span class="cg-ekran">${kacir(gelmediKurali(d))}</span></div>` : ""}</div>`;
+  const periodHtml = ({ d, days }) => {
+    const dt = evDayTotals(days);
+    const absent = days.filter((g) => g.absent);
+    const partial = days.length < d.days.length;
+    return `<div class="ev-ts-period">
+      <div class="ev-ts-head"><b>${esc(evPeriodShort(d))}</b>
+        <span>${d.status === "closed" ? "period closed" : "period open"}${partial ? ` · ${days.length}/${plural(d.days.length, "day")}` : ""}</span>
+        <span class="ev-ts-total">${plural(numText(dt.hours), "hour")} · ${plural(dt.days, "day")}${dt.overtime ? ` · ${numText(dt.overtime)} overtime` : ""}${dt.absent ? ` · <em class="bad">${dt.absent} absent</em>` : ""}</span></div>
+      <div class="ev-days">${days.map(dayHtml).join("")}</div>
+      ${absent.length ? `<div class="ev-note">Days you were absent: <b>${absent.map((g) => esc(longDate(g.day))).join(", ")}</b>.
+        <span class="ev-screen">${esc(absentRule(d))}</span></div>` : ""}</div>`;
   };
 
-  return el(`<div class="cg-bolum cg-puantaj"><h4>Puantajınız · ${tarihKisa(secim.bas)} – ${tarihKisa(secim.bit)}</h4>
-    <div class="cg-sayilar">
-      <div><b>${t.gun}</b><span>çalışılan gün</span></div>
-      <div><b>${sayiMetni(t.saat)}</b><span>toplam saat</span></div>
-      <div><b>${sayiMetni(t.normal)}</b><span>normal saat</span></div>
-      <div><b>${sayiMetni(t.mesai)}</b><span>mesai saati</span></div>
-      <div class="${t.gelmedi ? "kotu" : ""}"><b>${t.gelmedi}</b><span>gelmediğiniz gün</span></div>
-      ${t.izin ? `<div><b>${t.izin}</b><span>izin</span></div>` : ""}${t.rapor ? `<div><b>${t.rapor}</b><span>rapor</span></div>` : ""}
+  return el(`<div class="ev-section ev-ts"><h4>Your timesheet · ${shortDate(selection.from)} – ${shortDate(selection.to)}</h4>
+    <div class="ev-counts">
+      <div><b>${t.days}</b><span>days worked</span></div>
+      <div><b>${numText(t.hours)}</b><span>total hours</span></div>
+      <div><b>${numText(t.normal)}</b><span>normal hours</span></div>
+      <div><b>${numText(t.overtime)}</b><span>overtime hours</span></div>
+      <div class="${t.absent ? "bad" : ""}"><b>${t.absent}</b><span>days absent</span></div>
+      ${t.leave ? `<div><b>${t.leave}</b><span>leave</span></div>` : ""}${t.sick ? `<div><b>${t.sick}</b><span>sick</span></div>` : ""}
     </div>
-    ${parcalar.map(donemHtml).join("")}
-    <div class="lejant cg-lejant"><span class="lj">sayı = çalışılan saat</span><span class="lj v-gelmedi">– gelmedi</span>
-      <span class="lj v-izin">İ izin</span><span class="lj v-rapor">R rapor</span><span class="lj t-mesai">mesai günü</span><span class="lj t-tatil">tatil</span>
-      ${disiVar ? `<span class="lj cg-lj-disi">soluk gün = işe giriş öncesi / çalışma dönemi dışı</span>` : ""}</div>
+    ${parts.map(periodHtml).join("")}
+    <div class="legend ev-legend"><span class="lg">number = hours worked</span><span class="lg v-absent">– absent</span>
+      <span class="lg v-leave">L leave</span><span class="lg v-sick">S sick</span><span class="lg t-overtime">overtime day</span><span class="lg t-holiday">holiday</span>
+      ${anyOutside ? `<span class="lg ev-lg-out">faded day = before starting work / outside the employment period</span>` : ""}</div>
   </div>`);
 }
 
-/** Seçilen her dönemin hakediş hesabı (dönemin tamamı için). Kutular açık gelir; kapalı kutu kağıda çıkmaz. */
-function calisanHakedisBolumu(secim) {
-  const kismiVar = secim.donemler.some((d) => d.gunler[0].gun < secim.bas || d.gunler.at(-1).gun > secim.bit);
-  const b = el(`<div class="cg-bolum cg-hakedis"><h4>Hakedişinizin hesabı</h4>
-    ${kismiVar ? `<div class="cg-not soluk" style="margin:0 0 8px">Hakediş her zaman dönemin tamamı için hesaplanır; seçtiğiniz aralık dönemin bir kısmını kapsasa da.</div>` : ""}</div>`);
-  // Puantajla aynı sıra (eskiden yeniye): 2. yarının "ayın 1. yarısının neti" satırı 1. yarının hesabından sonra gelir.
-  for (const d of secim.donemler) {
-    const pb = d.paraBirimi;
-    const ozet = d.odemeTuru === "Aylık" && d.yari === 2 && d.aySonu ? `ay sonu ${toplamMetni(d.aySonu)}` : `net ${para(d.net?.[pb] ?? 0, pb)}`;
-    const det = el(`<details class="cg-hk" open><summary><b>${kacir(cgDonemKisa(d))}</b>
-      <span class="soluk">${d.durum === "kapali" ? "kapandı" : "açık"}</span><span class="cg-hk-t">${kacir(ozet)}</span></summary></details>`);
-    det.appendChild(calisanHakedisHtml(d));
+/** The earnings calculation of every chosen period (for the whole period). Boxes start open; a closed box is not printed. */
+function employeeEarningsSection(selection) {
+  const anyPartial = selection.periods.some((d) => d.days[0].day < selection.from || d.days.at(-1).day > selection.to);
+  const b = el(`<div class="ev-section ev-earnings"><h4>How your earnings are calculated</h4>
+    ${anyPartial ? `<div class="ev-note muted" style="margin:0 0 8px">Earnings are always calculated for the whole period, even if your chosen range covers only part of it.</div>` : ""}</div>`);
+  // Same order as the timesheet (oldest first): the 2nd half's "net of the 1st half" line comes after the 1st half's calculation.
+  for (const d of selection.periods) {
+    const cur = d.currency;
+    const summary = d.payType === "Monthly" && d.half === 2 && d.monthEnd ? `month end ${totalText(d.monthEnd)}` : `net ${money(d.net?.[cur] ?? 0, cur)}`;
+    const det = el(`<details class="ev-pay" open><summary><b>${esc(evPeriodShort(d))}</b>
+      <span class="muted">${d.status === "closed" ? "closed" : "open"}</span><span class="ev-pay-total">${esc(summary)}</span></summary></details>`);
+    det.appendChild(employeeEarningsHtml(d));
     b.appendChild(det);
   }
   return b;
 }
 
-/** Bir dönemin hakediş hesabı (çalışanın diliyle). */
-function calisanHakedisHtml(d) {
-  const pb = d.paraBirimi;
-  const aylik = d.odemeTuru === "Aylık", saatlik = d.odemeTuru === "Saatlik";
-  const net = d.net?.[pb] ?? 0;
-  const aySonuVar = aylik && d.yari === 2 && d.aySonu;
+/** One period's earnings calculation (in the employee's words). */
+function employeeEarningsHtml(d) {
+  const cur = d.currency;
+  const monthly = d.payType === "Monthly", hourly = d.payType === "Hourly";
+  const net = d.net?.[cur] ?? 0;
+  const hasMonthEnd = monthly && d.half === 2 && d.monthEnd;
 
-  // Hakediş satırları: [ad, formül, tutar (eksi = düşülen)]
+  // Earnings lines: [name, formula, amount (negative = deducted)]
   const s = [];
-  if (aylik) {
-    const yarim = Number(d.ucret) / 2;
-    if (d.kural === 1) {
-      s.push(["Maaşın yarısı", `${sayiMetni(d.ucret)} ${pb} ÷ 2`, yarim]);
-      if (d.kesinti) s.push(["Eksik saat kesintisi", "", -d.kesinti]);
-    } else if (Math.abs(d.tabanUcret - yarim) < 0.01) s.push(["Maaşın yarısı", `${sayiMetni(d.ucret)} ${pb} ÷ 2`, d.tabanUcret]);
-    else s.push(["Maaş payı", "işte olduğunuz günler: günlük maaş × gün", d.tabanUcret]);
-  } else if (saatlik) {
-    s.push(["Çalıştığınız saat", `${sayiMetni(d.normal)} saat × ${sayiMetni(d.ucret)} ${pb}`, d.tabanUcret]);
+  if (monthly) {
+    const half = Number(d.pay) / 2;
+    if (d.rule === 1) {
+      s.push(["Half of the salary", `${numText(d.pay)} ${cur} ÷ 2`, half]);
+      if (d.deduction) s.push(["Short-hours deduction", "", -d.deduction]);
+    } else if (Math.abs(d.basePay - half) < 0.01) s.push(["Half of the salary", `${numText(d.pay)} ${cur} ÷ 2`, d.basePay]);
+    else s.push(["Salary share", "days you were employed: daily salary × days", d.basePay]);
+  } else if (hourly) {
+    s.push(["Hours you worked", `${plural(numText(d.normal), "hour")} × ${numText(d.pay)} ${cur}`, d.basePay]);
   }
-  if (d.mesai) s.push(["Mesai", `${sayiMetni(d.mesai)} saat × ${sayiMetni(d.mesaiBirim)} ${pb}`, d.mesaiTutar]);
-  const dusulmeyen = [];
-  if (d.kural !== 1) {
-    for (const kl of d.kesintiKalem || []) {
-      if (kl.dusulmedi) { dusulmeyen.push(`${kl.ad.toLocaleLowerCase("tr")} ${para(kl.tutar, kl.pb)}`); continue; }
-      s.push([`Kesinti: ${kl.ad.toLocaleLowerCase("tr")}`, kl.formul, -kl.tutar]);
+  if (d.overtime) s.push(["Overtime", `${plural(numText(d.overtime), "hour")} × ${numText(d.overtimeUnit)} ${cur}`, d.overtimePay]);
+  const notDeducted = [];
+  if (d.rule !== 1) {
+    for (const kl of d.deductionItems || []) {
+      if (kl.notDeducted) { notDeducted.push(`${kl.name.toLowerCase()} ${money(kl.amount, kl.currency)}`); continue; }
+      s.push([`Deduction: ${kl.name.toLowerCase()}`, kl.formula, -kl.amount]);
     }
   }
-  // Avans: para birimine göre
-  const avansPB = {};
-  for (const a of d.avans) (avansPB[a.paraBirimi] ||= []).push(a);
-  for (const [apb, liste] of Object.entries(avansPB)) {
-    const toplam = liste.reduce((t, a) => t + a.tutar, 0);
-    const tarihler = liste.map((a) => tarihKisa(a.tarih).slice(0, 5)).join(", ");
-    const c = apb === pb ? null : d.avansCevrilen.find((x) => x.pb === apb);
-    if (apb === pb) s.push(["Aldığınız avans", tarihler, -toplam]);
-    else if (c) s.push(["Aldığınız avans", `${tarihler} · ${c.formul}`, -c.cevrilen]);
-    else dusulmeyen.push(`avans ${para(toplam, apb)} (${tarihler})`);
+  // Advances, by currency
+  const byCur = {};
+  for (const a of d.advances) (byCur[a.currency] ||= []).push(a);
+  for (const [acur, list] of Object.entries(byCur)) {
+    const total = list.reduce((t, a) => t + a.amount, 0);
+    const dates = list.map((a) => shortDate(a.date).slice(0, 5)).join(", ");
+    const c = acur === cur ? null : d.advanceConverted.find((x) => x.currency === acur);
+    if (acur === cur) s.push(["Advance you received", dates, -total]);
+    else if (c) s.push(["Advance you received", `${dates} · ${c.formula}`, -c.converted]);
+    else notDeducted.push(`advance ${money(total, acur)} (${dates})`);
   }
-  const cevrildi = (d.kesintiKalem || []).some((x) => x.kaynak) || d.avansCevrilen.length;
+  const converted = (d.deductionItems || []).some((x) => x.source) || d.advanceConverted.length;
 
-  return el(`<div class="cg-donem-govde">
-    <div class="cg-durum">${kacir(d.ad)} · ${d.durum === "kapali" ? "dönem kapandı" : "dönem açık; puantaj işlendikçe değişebilir"}${
-      aySonuVar ? " · ay sonu tutarı sonraki ayın 1'inde ödenir" : aylik ? " · aylık maaş ay sonunda ödenir"
-        : saatlik ? " · saatlik ücret dönem kapanınca ödenir" : ""}</div>
-    <table class="cg-hesap"><tbody>
-      ${s.map(([ad, f, t]) => `<tr class="${t < 0 ? "eksi" : ""}"><td>${kacir(ad)}</td><td class="f">${kacir(f)}</td>
-        <td class="t">${t < 0 ? "− " : ""}${kacir(para(Math.abs(t), pb))}</td></tr>`).join("")}
+  return el(`<div class="ev-period-body">
+    <div class="ev-state">${esc(d.name)} · ${d.status === "closed" ? "period closed" : "period open; may change as the timesheet is filled in"}${
+      hasMonthEnd ? " · the month-end amount is paid on the 1st of the next month" : monthly ? " · the monthly salary is paid at month end"
+        : hourly ? " · hourly wages are paid when the period closes" : ""}</div>
+    <table class="ev-calc"><tbody>
+      ${s.map(([name, f, t]) => `<tr class="${t < 0 ? "neg" : ""}"><td>${esc(name)}</td><td class="f">${esc(f)}</td>
+        <td class="amt">${t < 0 ? "− " : ""}${esc(money(Math.abs(t), cur))}</td></tr>`).join("")}
     </tbody><tfoot>
-      <tr><td colspan="2">${aySonuVar ? "Bu yarının neti" : "Net"}</td><td class="t">${kacir(para(net, pb))}</td></tr>
-      ${aySonuVar && d.ilkYariNet ? `<tr class="ara"><td colspan="2">Ayın 1. yarısının neti</td><td class="t">+ ${kacir(toplamMetni(d.ilkYariNet))}</td></tr>
-        <tr class="son"><td colspan="2">Ay sonunda alacağınız</td><td class="t">${kacir(toplamMetni(d.aySonu))}</td></tr>` : ""}
+      <tr><td colspan="2">${hasMonthEnd ? "Net for this half" : "Net"}</td><td class="amt">${esc(money(net, cur))}</td></tr>
+      ${hasMonthEnd && d.firstHalfNet ? `<tr class="mid"><td colspan="2">Net for the 1st half of the month</td><td class="amt">+ ${esc(totalText(d.firstHalfNet))}</td></tr>
+        <tr class="final"><td colspan="2">What you receive at month end</td><td class="amt">${esc(totalText(d.monthEnd))}</td></tr>` : ""}
     </tfoot></table>
-    ${dusulmeyen.length ? `<div class="cg-not">Maaşınızdan düşülmeyen, yöneticinizin ayrıca netleştireceği kalemler: ${kacir(dusulmeyen.join(", "))}.</div>` : ""}
-    ${cevrildi && d.kur ? `<div class="cg-not soluk">Farklı para birimindeki tutarlar dönemin kuruyla çevrildi: ${kacir(kurMetni(d.kur))}.</div>` : ""}
+    ${notDeducted.length ? `<div class="ev-note">Items not deducted from your pay, which your manager will settle separately: ${esc(notDeducted.join(", "))}.</div>` : ""}
+    ${converted && d.rates ? `<div class="ev-note muted">Amounts in another currency were converted at the period's rates: ${esc(ratesText(d.rates))}.</div>` : ""}
   </div>`);
 }
 
-/* ---------------- açılır menü ---------------- */
+/* ---------------- pop-up menu ---------------- */
 
-let acilirKapatici = null;
+let popCloser = null;
 
-function acilirKapat() {
-  document.querySelector(".acilir")?.remove();
-  if (acilirKapatici) { document.removeEventListener("mousedown", acilirKapatici, true); document.removeEventListener("keydown", acilirKapatici, true); }
-  acilirKapatici = null;
+function closePop() {
+  document.querySelector(".pop")?.remove();
+  if (popCloser) { document.removeEventListener("mousedown", popCloser, true); document.removeEventListener("keydown", popCloser, true); }
+  popCloser = null;
 }
 
-/** Bir öğenin yanında küçük bir menü açar. */
-function acilirAc(capa, html) {
-  acilirKapat();
-  const a = el(`<div class="acilir">${html}</div>`);
+/** Opens a small menu next to an element. */
+function openPop(anchor, html) {
+  closePop();
+  const a = el(`<div class="pop">${html}</div>`);
   document.body.appendChild(a);
-  const r = capa.getBoundingClientRect();
-  const sol = Math.max(8, Math.min(r.left, innerWidth - a.offsetWidth - 8));
-  const ust = r.bottom + a.offsetHeight + 8 > innerHeight ? Math.max(8, r.top - a.offsetHeight - 4) : r.bottom + 4;
-  a.style.left = `${sol}px`; a.style.top = `${ust}px`;
-  acilirKapatici = (ev) => {
-    if (ev.type === "keydown" ? ev.key === "Escape" : !a.contains(ev.target)) acilirKapat();
+  const r = anchor.getBoundingClientRect();
+  const left = Math.max(8, Math.min(r.left, innerWidth - a.offsetWidth - 8));
+  const top = r.bottom + a.offsetHeight + 8 > innerHeight ? Math.max(8, r.top - a.offsetHeight - 4) : r.bottom + 4;
+  a.style.left = `${left}px`; a.style.top = `${top}px`;
+  popCloser = (ev) => {
+    if (ev.type === "keydown" ? ev.key === "Escape" : !a.contains(ev.target)) closePop();
   };
   setTimeout(() => {
-    document.addEventListener("mousedown", acilirKapatici, true);
-    document.addEventListener("keydown", acilirKapatici, true);
+    document.addEventListener("mousedown", popCloser, true);
+    document.addEventListener("keydown", popCloser, true);
   }, 0);
   return a;
 }
 
-/* ---------------- PUANTAJ ---------------- */
+/* ---------------- TIMESHEET ---------------- */
 
-const PT = { paket: null, filtre: { ekip: "", proje: "", ara: "" }, kuyruk: Promise.resolve() };
-const GUN_TIP_AD = { normal: "Normal gün", mesai: "Mesai günü", tatil: "Tatil" };
-const iki = (n) => String(n).padStart(2, "0");
-const bugunStr = () => { const d = new Date(); return `${d.getFullYear()}-${iki(d.getMonth() + 1)}-${iki(d.getDate())}`; };
-const tarihDonemi = (t) => `${t.slice(0, 7)}-${+t.slice(8, 10) <= 15 ? 1 : 2}`;
-const saatMetni = (n) => (n ? sayiMetni(n) : "0");
-const ptKapali = () => PT.paket?.kayit?.durum === "kapali";
-const ptSatir = (kod) => PT.paket.kayit.satirlar.find((s) => s.personelKod === kod);
-const ptEkipAdi = (kod) => PT.paket.kayit.ekipler[kod]?.ad || kayitlar("ekip").find((e) => e.kod === kod)?.ad || "";
+const TS = { pkg: null, filter: { crew: "", project: "", search: "" }, queue: Promise.resolve() };
+const DAY_TYPE_NAME = { normal: "Normal day", overtime: "Overtime day", holiday: "Holiday" };
+const two = (n) => String(n).padStart(2, "0");
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`; };
+const periodOfDate = (t) => `${t.slice(0, 7)}-${+t.slice(8, 10) <= 15 ? 1 : 2}`;
+const hoursText = (n) => (n ? numText(n) : "0");
+const tsClosed = () => TS.pkg?.record?.status === "closed";
+const tsRow = (code) => TS.pkg.record.rows.find((s) => s.employeeCode === code);
+const tsCrewName = (code) => TS.pkg.record.crews[code]?.name || records("crews").find((e) => e.code === code)?.name || "";
 
-function ptGorunen() {
-  const { kayit } = PT.paket;
-  const { ekip, proje, ara } = PT.filtre;
-  const q = ara.trim().toLocaleLowerCase("tr");
-  return kayit.satirlar.filter((s) => {
-    const ekipler = [s.ekip, ...Object.values(s.ekipGun)];
-    if (ekip && !ekipler.includes(ekip)) return false;
-    if (proje && !ekipler.some((e) => kayit.ekipler[e]?.proje === proje) && s.proje !== proje) return false;
-    if (q && !`${s.ad} ${s.personelKod}`.toLocaleLowerCase("tr").includes(q)) return false;
+function tsVisible() {
+  const { record } = TS.pkg;
+  const { crew, project, search } = TS.filter;
+  const q = search.trim().toLocaleLowerCase("tr");
+  return record.rows.filter((s) => {
+    const crews = [s.crew, ...Object.values(s.crewDays)];
+    if (crew && !crews.includes(crew)) return false;
+    if (project && !crews.some((e) => record.crews[e]?.project === project) && s.project !== project) return false;
+    if (q && !`${s.name} ${s.employeeCode}`.toLocaleLowerCase("tr").includes(q)) return false;
     return true;
   });
 }
 
-function ptOzetSutunlari() {
-  const tek = (h, v) => (v ? { [h.paraBirimi]: v } : {});
+function tsSummaryColumns() {
+  const one = (h, v) => (v ? { [h.currency]: v } : {});
   return [
-    { k: "toplam", b: "Toplam", saat: (h) => h.toplam, f: (h) => `<b>${saatMetni(h.toplam)}</b>` },
-    { k: "normal", b: "Normal", saat: (h) => h.normal, f: (h) => saatMetni(h.normal) },
-    { k: "mesai", b: "Mesai", saat: (h) => h.mesai, f: (h) => (h.mesai ? `<span class="vurgu">${saatMetni(h.mesai)}</span>` : "0") },
-    { k: "eksik", b: "Eksik", saat: (h) => h.eksik, f: (h) => (h.eksik ? `<span class="kotu">${saatMetni(h.eksik)}</span>` : "0") },
-    { k: "gelmedi", b: "Gelmedi", saat: (h) => h.gelmedi, f: (h) => (h.gelmedi ? `<span class="kotu">${h.gelmedi} gün</span>` : "0") },
-    { k: "hakedis", b: "Hakediş", para: (h) => tek(h, h.hakedis), f: (h) => (h.hakedis ? toplamMetni(tek(h, h.hakedis)) : `<span class="soluk">—</span>`) },
-    { k: "kesinti", b: "Kesinti", para: (h) => tek(h, h.kesinti), f: (h) => (h.kesinti || Object.keys(h.kesintiDisi || {}).length
-      ? `<span class="kotu kd-ac" data-kd title="${kacir(kesintiIpucu(h))}">${h.kesinti ? toplamMetni(tek(h, h.kesinti)) : "0"}${Object.keys(h.kesintiDisi || {}).length ? " *" : ""}</span>`
-      : `<span class="soluk">—</span>`) },
-    { k: "avans", b: "Avans", para: (h) => h.avans, f: (h) => toplamMetni(h.avans) },
-    { k: "net", b: "Net", para: (h) => h.net, f: (h) => `<b>${toplamMetni(h.net)}</b>` },
-    ...(PT.paket.donem.endsWith("-2")
-      ? [{ k: "aySonu", b: "Ay Sonu Ödenecek", para: (h) => h.aySonu, f: (h) => `<b class="vurgu">${toplamMetni(h.aySonu)}</b>` }]
+    { k: "total", label: "Total", hours: (h) => h.total, f: (h) => `<b>${hoursText(h.total)}</b>` },
+    { k: "normal", label: "Normal", hours: (h) => h.normal, f: (h) => hoursText(h.normal) },
+    { k: "overtime", label: "Overtime", hours: (h) => h.overtime, f: (h) => (h.overtime ? `<span class="hl">${hoursText(h.overtime)}</span>` : "0") },
+    { k: "short", label: "Short", hours: (h) => h.short, f: (h) => (h.short ? `<span class="bad">${hoursText(h.short)}</span>` : "0") },
+    { k: "absent", label: "Absent", hours: (h) => h.absent, f: (h) => (h.absent ? `<span class="bad">${plural(h.absent, "day")}</span>` : "0") },
+    { k: "earnings", label: "Earnings", money: (h) => one(h, h.earnings), f: (h) => (h.earnings ? totalText(one(h, h.earnings)) : `<span class="muted">—</span>`) },
+    { k: "deduction", label: "Deduction", money: (h) => one(h, h.deduction), f: (h) => (h.deduction || Object.keys(h.notDeducted || {}).length
+      ? `<span class="bad dd-open" data-dd title="${esc(deductionHint(h))}">${h.deduction ? totalText(one(h, h.deduction)) : "0"}${Object.keys(h.notDeducted || {}).length ? " *" : ""}</span>`
+      : `<span class="muted">—</span>`) },
+    { k: "advance", label: "Advance", money: (h) => h.advance, f: (h) => totalText(h.advance) },
+    { k: "net", label: "Net", money: (h) => h.net, f: (h) => `<b>${totalText(h.net)}</b>` },
+    ...(TS.pkg.period.endsWith("-2")
+      ? [{ k: "monthEnd", label: "Due at Month End", money: (h) => h.monthEnd, f: (h) => `<b class="hl">${totalText(h.monthEnd)}</b>` }]
       : []),
   ];
 }
 
-/** Kesintinin formül formül dökümü (puantaj, personel kartı). */
-function kesintiSatirlari(h) {
-  if (h.kural === 1) return [`Eksik ${saatMetni(h.eksik)} saat × saat değeri ${sayiMetni(h.saatDegeri)} ${h.paraBirimi} (eski kural)`];
-  return (h.kesintiKalem || []).map((k) =>
-    `${k.ad}: ${k.formul} = ${sayiMetni(k.tutar)} ${k.pb}${k.dusulmedi ? ` (${k.dusulmedi}; maaştan düşülmedi)` : ""}`);
+/** The deduction broken down formula by formula (timesheet, employee card). */
+function deductionLines(h) {
+  if (h.rule === 1) return [`Short ${plural(hoursText(h.short), "hour")} × hourly value ${numText(h.hourlyValue)} ${h.currency} (old rule)`];
+  return (h.deductionItems || []).map((k) =>
+    `${k.name}: ${k.formula} = ${numText(k.amount)} ${k.currency}${k.notDeducted ? ` (${k.notDeducted}; not deducted from pay)` : ""}`);
 }
 
-/** Kesinti hücresinin üzerine gelince görünen kısa döküm. */
-function kesintiIpucu(h) {
-  const sat = kesintiSatirlari(h);
-  if (h.kural !== 1 && h.kesinti) sat.push(`Toplam: ${sayiMetni(h.kesinti)} ${h.paraBirimi}`, "Ayrıntı için tıklayın");
-  return sat.join("\n");
+/** The short breakdown shown when hovering over the deduction cell. */
+function deductionHint(h) {
+  const lines = deductionLines(h);
+  if (h.rule !== 1 && h.deduction) lines.push(`Total: ${numText(h.deduction)} ${h.currency}`, "Click for details");
+  return lines.join("\n");
 }
 
-/** Kesinti hücresine tıklayınca açılan döküm: kalem kalem formül, toplam, çevrilen avans ve dönemin kuru. */
-function ptKesintiAc(capa, kod) {
-  const h = PT.paket.hesap.satirlar.find((x) => x.personelKod === kod);
-  const s = ptSatir(kod);
+/** The breakdown that opens when the deduction cell is clicked: each item's formula, the total, converted advances and the period's rates. */
+function tsOpenDeduction(anchor, code) {
+  const h = TS.pkg.calc.rows.find((x) => x.employeeCode === code);
+  const s = tsRow(code);
   if (!h || !s) return;
-  const pb = h.paraBirimi;
-  const govde = h.kural === 1
-    ? `<div class="acilir-not">${kacir(kesintiSatirlari(h)[0])}</div>`
-    : `<table class="kd-tablo"><tbody>${(h.kesintiKalem || []).map((k) => `<tr class="${k.dusulmedi ? "dusulmedi" : ""}">
-        <td>${kacir(k.ad)}</td><td class="kd-f">${kacir(k.formul)}</td>
-        <td class="kd-t">${sayiMetni(k.tutar)} ${kacir(k.pb)}${k.dusulmedi ? `<div class="kd-not">${kacir(k.dusulmedi)}, düşülmedi</div>` : ""}</td></tr>`).join("")}
-      </tbody><tfoot><tr><td colspan="2">Toplam kesinti</td><td class="kd-t">${sayiMetni(h.kesinti)} ${kacir(pb)}</td></tr></tfoot></table>
-      ${(h.avansCevrilen || []).map((a) => `<div class="acilir-not">Avans: ${kacir(a.formul)} = ${sayiMetni(a.cevrilen)} ${kacir(pb)}</div>`).join("")}
-      <div class="acilir-not soluk">${h.gelmedi} gün gelmedi · ${h.kur ? `dönemin kuru: ${kacir(kurMetni(h.kur))}` : "bu dönemde kur çevirisi yok"}</div>`;
-  const a = acilirAc(capa, `<div class="acilir-bas">${kacir(s.ad)} · kesinti dökümü</div>${govde}`);
-  a.classList.add("genis");
+  const cur = h.currency;
+  const body = h.rule === 1
+    ? `<div class="pop-note">${esc(deductionLines(h)[0])}</div>`
+    : `<table class="dd-table"><tbody>${(h.deductionItems || []).map((k) => `<tr class="${k.notDeducted ? "not-deducted" : ""}">
+        <td>${esc(k.name)}</td><td class="dd-f">${esc(k.formula)}</td>
+        <td class="dd-t">${numText(k.amount)} ${esc(k.currency)}${k.notDeducted ? `<div class="dd-note">${esc(k.notDeducted)}, not deducted</div>` : ""}</td></tr>`).join("")}
+      </tbody><tfoot><tr><td colspan="2">Total deduction</td><td class="dd-t">${numText(h.deduction)} ${esc(cur)}</td></tr></tfoot></table>
+      ${(h.advanceConverted || []).map((a) => `<div class="pop-note">Advance: ${esc(a.formula)} = ${numText(a.converted)} ${esc(cur)}</div>`).join("")}
+      <div class="pop-note muted">${plural(h.absent, "day")} absent · ${h.rates ? `period rates: ${esc(ratesText(h.rates))}` : "no currency conversion in this period"}</div>`;
+  const a = openPop(anchor, `<div class="pop-head">${esc(s.name)} · deduction breakdown</div>${body}`);
+  a.classList.add("wide");
 }
 
-function ptHucreSinif(s, gun) {
-  const tip = PT.paket.kayit.gunler[gun] || "normal";
-  const v = s.hucre[gun] || "";
-  const c = ["hc", `t-${tip}`];
-  if (v === "İ") c.push("v-izin"); else if (v === "R") c.push("v-rapor"); else if (v === "–") c.push("v-gelmedi");
-  if (s.ekipGun[gun]) c.push("baska-ekip");
-  const k2 = (PT.paket.kayit.kural || 1) >= 2;
-  if (k2 && ((s.iseGiris && gun < s.iseGiris) || (s.calisma && !s.calisma.some(([b, e]) => gun >= b && (!e || gun <= e))))) c.push("giris-oncesi");
-  // Eski kuralda boş geçmiş gün eksik sayılır (kırmızı); yeni kuralda sadece "–" kesinti doğurur.
-  else if (!k2 && !v && tip === "normal" && (ptKapali() || gun <= bugunStr())) c.push("bos-gecmis");
+function tsCellClass(s, day) {
+  const type = TS.pkg.record.days[day] || "normal";
+  const v = s.cells[day] || "";
+  const c = ["cell", `t-${type}`];
+  if (v === "L") c.push("v-leave"); else if (v === "S") c.push("v-sick"); else if (v === "–") c.push("v-absent");
+  if (s.crewDays[day]) c.push("other-crew");
+  const r2 = (TS.pkg.record.rule || 1) >= 2;
+  if (r2 && ((s.startDate && day < s.startDate) || (s.workRanges && !s.workRanges.some(([b, e]) => day >= b && (!e || day <= e))))) c.push("pre-start");
+  // Under the old rule an empty past day counts as short (red); under the new rule only "–" leads to a deduction.
+  else if (!r2 && !v && type === "normal" && (tsClosed() || day <= todayStr())) c.push("empty-past");
   return c.join(" ");
 }
 
-async function puantajCiz(donem) {
-  if (!donem) { location.replace(`#puantaj/${tarihDonemi(bugunStr())}`); return; }
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  await kaynaklariYukle();
+async function renderTimesheet(period) {
+  if (!period) { location.replace(`#timesheet/${periodOfDate(todayStr())}`); return; }
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  await loadSources();
   let p;
-  try { p = await api(`/puantaj/${donem}`); }
-  catch (e) { ana.innerHTML = `<div class="bos"><div class="bs">Dönem açılamadı</div><p>${kacir(e.message)}</p></div>`; return; }
-  PT.paket = p;
+  try { p = await api(`/timesheet/${period}`); }
+  catch (e) { main.innerHTML = `<div class="empty"><div class="big">Could not open the period</div><p>${esc(e.message)}</p></div>`; return; }
+  TS.pkg = p;
 
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas"><div><h2>Puantaj</h2>
-    <p>Hücreye saat yazın; <b>İ</b> izin, <b>R</b> rapor, <b>–</b> gelmedi. Gün başlığına tıklayarak gün tipini,
-    hücreye sağ tıklayarak o günün ekibini değiştirirsiniz. Excel'den kopyalanan bloklar doğrudan yapıştırılabilir.</p></div></div>`));
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head"><div><h2>Timesheets</h2>
+    <p>Type hours into a cell; <b>L</b> leave, <b>S</b> sick, <b>–</b> absent. Click a day header to change the day type,
+    right-click a cell to change that day's crew. Blocks copied from Excel can be pasted straight in.</p></div></div>`));
 
-  const durum = p.kayit ? p.kayit.durum : "yok";
-  const cubuk = el(`<div class="donem-cubugu">
-    <a class="dg ok-dg" href="#puantaj/${p.onceki}" title="Önceki dönem">‹</a>
-    <div class="donem-ad">${kacir(p.ad)}<span class="durum-pul ${durum}">${{ acik: "açık", kapali: "kapalı", yok: "açılmadı" }[durum]}</span></div>
-    <a class="dg ok-dg" href="#puantaj/${p.sonraki}" title="Sonraki dönem">›</a>
-    ${p.donem !== p.buDonem ? `<a class="dg ufak" href="#puantaj/${p.buDonem}">Bu döneme git</a>` : ""}
-    <div class="bas-arac">${p.kayit ? `
-      ${durum === "acik" ? `<button class="dg" data-is="kisi">+ Kişi ekle</button>` : ""}
-      <button class="dg" data-is="excel-in">Excel'e aktar</button>
-      ${durum === "acik" ? `<button class="dg" data-is="excel-yuk">Excel'den yükle</button>` : ""}
-      ${durum === "acik" ? `<button class="dg bas" data-is="kapat">Dönemi kapat</button>` : `<button class="dg" data-is="ac">Dönemi yeniden aç</button>`}
+  const state = p.record ? p.record.status : "none";
+  const bar = el(`<div class="period-bar">
+    <a class="btn arrow-btn" href="#timesheet/${p.previous}" title="Previous period">‹</a>
+    <div class="period-name">${esc(p.name)}<span class="state-pill ${state}">${{ open: "open", closed: "closed", none: "not opened" }[state]}</span></div>
+    <a class="btn arrow-btn" href="#timesheet/${p.next}" title="Next period">›</a>
+    ${p.period !== p.current ? `<a class="btn small" href="#timesheet/${p.current}">Go to the current period</a>` : ""}
+    <div class="head-tools">${p.record ? `
+      ${state === "open" ? `<button class="btn" data-do="person">+ Add person</button>` : ""}
+      <button class="btn" data-do="excel-out">Export to Excel</button>
+      ${state === "open" ? `<button class="btn" data-do="excel-in">Import from Excel</button>` : ""}
+      ${state === "open" ? `<button class="btn primary" data-do="close">Close period</button>` : `<button class="btn" data-do="open">Reopen period</button>`}
     ` : ""}</div></div>`);
-  ana.appendChild(cubuk);
+  main.appendChild(bar);
 
-  if (p.yok) return ptAcilmamisCiz(p);
+  if (p.missing) return tsRenderNotOpened(p);
 
-  const filtre = el(`<div class="pt-filtre">
-    <select data-f="ekip"><option value="">Tüm ekipler</option>
-      ${Object.entries(p.kayit.ekipler).map(([k, e]) => `<option value="${kacir(k)}">${kacir(`${k} — ${e.ad}`)}</option>`).join("")}</select>
-    <select data-f="proje"><option value="">Tüm projeler</option>
-      ${[...new Map(Object.values(p.kayit.ekipler).filter((e) => e.proje).map((e) => [e.proje, e.projeAd])).entries()]
-        .map(([k, a]) => `<option value="${kacir(k)}">${kacir(a || k)}</option>`).join("")}</select>
-    <div class="ara-kutu"><input data-f="ara" placeholder="Kişi ara…"></div>
-    <div class="lejant">
-      <span class="lj t-mesai">mesai günü</span><span class="lj t-tatil">tatil</span>
-      <span class="lj v-izin">İ izin</span><span class="lj v-rapor">R rapor</span><span class="lj v-gelmedi">– gelmedi</span>
-      ${(p.kayit?.kural || 1) >= 2 ? `<span class="lj giris-oncesi" title="Bu günler hesaba girmez">işe giriş öncesi / çalışma dönemi dışı</span>` : `<span class="lj bos-gecmis">girilmemiş (eksik sayılır)</span>`}<span class="lj baska-ekip">başka ekip</span></div>
+  const filter = el(`<div class="ts-filter">
+    <select data-f="crew"><option value="">All crews</option>
+      ${Object.entries(p.record.crews).map(([k, e]) => `<option value="${esc(k)}">${esc(`${k} — ${e.name}`)}</option>`).join("")}</select>
+    <select data-f="project"><option value="">All projects</option>
+      ${[...new Map(Object.values(p.record.crews).filter((e) => e.project).map((e) => [e.project, e.projectName])).entries()]
+        .map(([k, a]) => `<option value="${esc(k)}">${esc(a || k)}</option>`).join("")}</select>
+    <div class="search"><input data-f="search" placeholder="Find a person…"></div>
+    <div class="legend">
+      <span class="lg t-overtime">overtime day</span><span class="lg t-holiday">holiday</span>
+      <span class="lg v-leave">L leave</span><span class="lg v-sick">S sick</span><span class="lg v-absent">– absent</span>
+      ${(p.record?.rule || 1) >= 2 ? `<span class="lg pre-start" title="These days are not counted">before starting / outside the employment period</span>` : `<span class="lg empty-past">not entered (counts as short)</span>`}<span class="lg other-crew">other crew</span></div>
   </div>`);
-  for (const s of filtre.querySelectorAll("[data-f]")) {
-    s.value = PT.filtre[s.dataset.f] || "";
-    s.addEventListener(s.tagName === "INPUT" ? "input" : "change", () => { PT.filtre[s.dataset.f] = s.value; ptIzgaraCiz(); });
+  for (const s of filter.querySelectorAll("[data-f]")) {
+    s.value = TS.filter[s.dataset.f] || "";
+    s.addEventListener(s.tagName === "INPUT" ? "input" : "change", () => { TS.filter[s.dataset.f] = s.value; tsRenderGrid(); });
   }
-  ana.appendChild(filtre);
+  main.appendChild(filter);
 
-  const cekmeceAcik = localStorage.getItem("kadro-cekmece") !== "0";
-  const duzen = el(`<div class="pt-duzen ${cekmeceAcik ? "cekmece-acik" : ""}">
-    <div class="pt-sol"><div id="kapaliBant"></div><div class="pt-sar"><table class="pt"></table></div></div>
-    <aside class="cekmece"></aside></div>`);
-  ana.appendChild(duzen);
+  let drawerOpen = true;
+  try { drawerOpen = localStorage.getItem("kadro-drawer") !== "0"; } catch { /* no storage */ }
+  const layout = el(`<div class="ts-layout ${drawerOpen ? "drawer-open" : ""}">
+    <div class="ts-main"><div id="closedBand"></div><div class="ts-wrap"><table class="ts"></table></div></div>
+    <aside class="drawer"></aside></div>`);
+  main.appendChild(layout);
 
-  ptAracBagla(cubuk);
-  ptKapaliBantCiz();
-  ptIzgaraCiz();
-  ptCekmeceCiz();
+  tsBindTools(bar);
+  tsRenderClosedBand();
+  tsRenderGrid();
+  tsRenderDrawer();
 }
 
-function ptAcilmamisCiz(p) {
-  const o = p.onizleme;
-  const k = el(`<div class="kart"><div class="kart-govde acilmamis">
-    <div class="bs">Bu dönem henüz açılmadı</div>
-    <p>Dönem açılınca <b>${o.kisi}</b> kişinin maaşı, ekibi, ekiplerin yemek tutarı ve ev kira payları bu döneme kopyalanır.
-      Bundan sonra yapılan maaş değişiklikleri bu dönemi etkilemez; sadece yeni açılan dönemlere yansır.</p>
-    ${metrikler([[String(o.kisi), "Kişi"], [String(o.ekip), "Ekip"], [String(o.ekipsiz), "Ekipsiz kişi"], [String(o.maassiz.length), "Maaşı girilmemiş"]])}
-    ${o.maassiz.length ? `<div class="o-not">Maaşı girilmemiş kişilerin hakedişi hesaplanmaz: ${kacir(o.maassiz.join(", "))}.
-      Dönemi açmadan önce <a href="#t/personel">Personel</a> tablosundan girebilirsiniz.</div>` : ""}
-    <p class="soluk">${o.oncekiAyar
-      ? `Mesai ayarları önceki dönemden devralınır: çarpan ${kacir(o.oncekiAyar.mesaiCarpani)}, normal gün ${kacir(o.oncekiAyar.normalSaat)} saat.`
-      : "Varsayılan mesai ayarları: çarpan 1,5, normal gün 8 saat. Cumartesi mesai günü, Pazar tatil."} Hepsi yan panelden değiştirilebilir.</p>
-    <button class="dg bas" data-ac>Dönemi aç</button>
+function tsRenderNotOpened(p) {
+  const o = p.preview;
+  const k = el(`<div class="card"><div class="card-body not-opened">
+    <div class="big">This period has not been opened yet</div>
+    <p>Opening the period copies the pay and crew of <b>${o.people}</b> people, the crews' meal amounts and the house rent shares into it.
+      Pay changes made after that do not affect this period; they only apply to periods opened later.</p>
+    ${metrics([[String(o.people), "People"], [String(o.crews), "Crews"], [String(o.noCrew), "People without a crew"], [String(o.unpaid.length), "No pay entered"]])}
+    ${o.unpaid.length ? `<div class="sugg-note">Earnings are not calculated for people without pay: ${esc(o.unpaid.join(", "))}.
+      You can enter it in the <a href="#t/employees">Employees</a> table before opening the period.</div>` : ""}
+    <p class="muted">${o.previousSettings
+      ? `Overtime settings are carried over from the previous period: multiplier ${esc(o.previousSettings.overtimeMultiplier)}, normal day ${plural(esc(o.previousSettings.normalHours), "hour")}.`
+      : "Default overtime settings: multiplier 1.5, normal day 8 hours. Saturday is an overtime day, Sunday a holiday."} All of them can be changed in the side panel.</p>
+    <button class="btn primary" data-open>Open period</button>
   </div></div>`);
-  k.querySelector("[data-ac]").onclick = async (ev) => {
+  k.querySelector("[data-open]").onclick = async (ev) => {
     ev.target.disabled = true;
-    try { await api(`/puantaj/${p.donem}`, { method: "POST" }); bildir("Dönem açıldı", p.ad, "iyi"); await yonlendir(); }
-    catch (e) { hataBildir(e); ev.target.disabled = false; }
+    try { await api(`/timesheet/${p.period}`, { method: "POST" }); toast("Period opened", p.name, "good"); await route(); }
+    catch (e) { toastError(e); ev.target.disabled = false; }
   };
-  ana.appendChild(k);
+  main.appendChild(k);
 }
 
-function ptKapaliBantCiz() {
-  const b = document.getElementById("kapaliBant");
-  const k = PT.paket.kayit;
+function tsRenderClosedBand() {
+  const b = document.getElementById("closedBand");
+  const k = TS.pkg.record;
   if (!b) return;
-  if (k.durum !== "kapali") { b.innerHTML = ""; return; }
-  const kp = k.kapanis || {};
-  b.innerHTML = `<div class="kapali-bant">Bu dönem ${kacir(kp.tarih ? new Date(kp.tarih).toLocaleString("tr-TR") : "")} tarihinde
-    ${kacir(kp.kullanici || "")} tarafından kapatıldı; hücreler kilitli.
-    ${kp.dosya ? `Excel: <code>${kacir(kp.dosya)}</code> <button class="dg ufak" data-klasor>Klasörü aç</button>` : ""}</div>`;
-  b.querySelector("[data-klasor]")?.addEventListener("click", async () => {
-    try { await api("/klasor-ac", { method: "POST", body: JSON.stringify({ yol: kp.dosya.split("/").slice(0, -1).join("/") }) }); }
-    catch (e) { hataBildir(e); }
+  if (k.status !== "closed") { b.innerHTML = ""; return; }
+  const kp = k.closing || {};
+  b.innerHTML = `<div class="closed-band">This period was closed on ${esc(kp.date ? new Date(kp.date).toLocaleString("en-GB") : "")}
+    by ${esc(kp.user || "")}; the cells are locked.
+    ${kp.file ? `Excel: <code>${esc(kp.file)}</code> <button class="btn small" data-folder>Open folder</button>` : ""}</div>`;
+  b.querySelector("[data-folder]")?.addEventListener("click", async () => {
+    try { await api("/open-folder", { method: "POST", body: JSON.stringify({ path: kp.file.split("/").slice(0, -1).join("/") }) }); }
+    catch (e) { toastError(e); }
   });
 }
 
-function ptAracBagla(cubuk) {
-  const p = PT.paket;
-  const is = (ad, f) => cubuk.querySelector(`[data-is="${ad}"]`)?.addEventListener("click", f);
-  is("excel-in", () => { location.href = `/api/puantaj/${p.donem}/excel`; });
-  is("excel-yuk", () => {
+function tsBindTools(bar) {
+  const p = TS.pkg;
+  const on = (name, f) => bar.querySelector(`[data-do="${name}"]`)?.addEventListener("click", f);
+  on("excel-out", () => { location.href = `/api/timesheet/${p.period}/excel`; });
+  on("excel-in", () => {
     const g = el(`<input type="file" accept=".xlsx" hidden>`);
     g.onchange = async () => {
       if (!g.files[0]) return;
-      const fd = new FormData(); fd.append("dosya", g.files[0]);
+      const fd = new FormData(); fd.append("file", g.files[0]);
       try {
-        const r = await api(`/puantaj/${p.donem}/excel`, { method: "POST", body: fd });
-        PT.paket = r; ptIzgaraCiz();
-        bildir("Excel içe aktarıldı", `${r.rapor.degisen} hücre güncellendi.` +
-          (r.rapor.bilinmeyen.length ? ` Bu dönemde olmayan ${r.rapor.bilinmeyen.length} kişi atlandı: ${r.rapor.bilinmeyen.join(", ")}` : ""), "iyi");
-      } catch (e) { hataBildir(e); }
+        const r = await api(`/timesheet/${p.period}/excel`, { method: "POST", body: fd });
+        TS.pkg = r; tsRenderGrid();
+        toast("Excel imported", `${plural(r.report.changed, "cell")} updated.` +
+          (r.report.unknown.length ? ` ${plural(r.report.unknown.length, "person", "people")} not in this period were skipped: ${r.report.unknown.join(", ")}` : ""), "good");
+      } catch (e) { toastError(e); }
     };
     g.click();
   });
-  is("kapat", async () => {
-    const ok = await onay("Dönem kapatılsın mı?",
-      "Dönem kilitlenir, boş bırakılan normal günler eksik saat sayılır ve dönemin Excel dosyası 02 - Muhasebe / Maaşlar / Puantaj klasörüne yazılır. " +
-      `Saatlik çalışanların${p.donem.endsWith("-2") ? " ve aylık maaşlıların (ay sonu)" : ""} ödemesi Ödemeler ekranında "bekliyor" olarak görünür; ödendi işaretlenince kasaya düşer. ` +
-      "Gerekirse dönemi yeniden açabilirsiniz.",
-      "Dönemi kapat");
+  on("close", async () => {
+    const ok = await confirmBox("Close this period?",
+      "The period is locked, normal days left empty count as short hours, and the period's Excel file is written to the 02 - Accounting / Payroll / Timesheets folder. " +
+      `Payments for hourly workers${p.period.endsWith("-2") ? " and monthly-paid staff (month end)" : ""} show as "pending" on the Payments page; once marked paid they go into the cash book. ` +
+      "You can reopen the period if needed.",
+      "Close period");
     if (!ok) return;
     try {
-      const r = await api(`/puantaj/${p.donem}/kapat`, { method: "POST" });
-      if (r.dosyaHatasi) bildir("Dönem kapandı", r.dosyaHatasi, "hata"); else bildir("Dönem kapandı", r.dosya, "iyi");
-      bildir("Ödemeler hazır", "Maaş ödemeleri Ödemeler ekranında ödendi işaretini bekliyor.", "iyi");
-      await durumYukle();
-      S.agac = null; await yonlendir();
-    } catch (e) { hataBildir(e); }
+      const r = await api(`/timesheet/${p.period}/close`, { method: "POST" });
+      if (r.fileError) toast("Period closed", r.fileError, "error"); else toast("Period closed", r.file, "good");
+      toast("Payments ready", "Salary payments are waiting to be marked paid on the Payments page.", "good");
+      await loadStatus();
+      S.tree = null; await route();
+    } catch (e) { toastError(e); }
   });
-  is("ac", async () => {
-    const ok = await onay("Dönem yeniden açılsın mı?", "Hücreler tekrar düzenlenebilir olur. Kapanışta yazılan Excel dosyası yerinde kalır; tekrar kapattığınızda güncellenir. " +
-      "Bu dönemin maaş kalemleri Ödemeler ekranından kalkar; ödendi işaretlenmiş olanların kaydı ve kasa satırı durur. Tekrar kapatınca kalemler yeniden oluşur.", "Yeniden aç");
+  on("open", async () => {
+    const ok = await confirmBox("Reopen this period?", "The cells become editable again. The Excel file written at closing stays where it is; it is updated when you close again. " +
+      "This period's salary items are removed from the Payments page; records and cash rows of items already marked paid remain. Closing again recreates the items.", "Reopen");
     if (!ok) return;
     try {
-      const r = await api(`/puantaj/${p.donem}/ac`, { method: "POST" });
-      bildir("Dönem yeniden açıldı", r.kasa?.silinen ? `Kasadan ${r.kasa.silinen} otomatik satır kaldırıldı.` : "", "iyi");
-      await yonlendir();
+      const r = await api(`/timesheet/${p.period}/open`, { method: "POST" });
+      toast("Period reopened", r.cash?.deleted ? `${r.cash.deleted} automatic rows removed from the cash book.` : "", "good");
+      await route();
     }
-    catch (e) { hataBildir(e); }
+    catch (e) { toastError(e); }
   });
-  is("kisi", (ev) => {
-    const varolan = new Set(p.kayit.satirlar.map((s) => s.personelKod));
-    const adaylar = kayitlar("personel").filter((x) => x.durum !== "Ayrıldı" && !varolan.has(x.kod));
-    const a = acilirAc(ev.currentTarget, `<div class="acilir-bas">Döneme kişi ekle</div>
-      <div class="acilir-not">Kişi bugünkü maaşı ve ekibiyle eklenir.</div>
-      <select>${adaylar.length ? adaylar.map((x) => `<option value="${kacir(x.kod)}">${kacir(`${x.kod} — ${x.ad}`)}</option>`).join("") : `<option value="">Eklenecek kimse yok</option>`}</select>
-      <button class="dg ufak bas" ${adaylar.length ? "" : "disabled"}>Ekle</button>`);
+  on("person", (ev) => {
+    const present = new Set(p.record.rows.map((s) => s.employeeCode));
+    const candidates = records("employees").filter((x) => x.status !== "Left" && !present.has(x.code));
+    const a = openPop(ev.currentTarget, `<div class="pop-head">Add a person to the period</div>
+      <div class="pop-note">The person is added with today's pay and crew.</div>
+      <select>${candidates.length ? candidates.map((x) => `<option value="${esc(x.code)}">${esc(`${x.code} — ${x.name}`)}</option>`).join("") : `<option value="">Nobody to add</option>`}</select>
+      <button class="btn small primary" ${candidates.length ? "" : "disabled"}>Add</button>`);
     a.querySelector("button").onclick = async () => {
-      const kod = a.querySelector("select").value;
-      if (!kod) return;
-      acilirKapat();
-      try { PT.paket = await api(`/puantaj/${p.donem}/satir`, { method: "POST", body: JSON.stringify({ personelKod: kod }) }); ptIzgaraCiz(); bildir("Kişi eklendi", kod, "iyi"); }
-      catch (e) { hataBildir(e); }
+      const code = a.querySelector("select").value;
+      if (!code) return;
+      closePop();
+      try { TS.pkg = await api(`/timesheet/${p.period}/row`, { method: "POST", body: JSON.stringify({ employeeCode: code }) }); tsRenderGrid(); toast("Person added", code, "good"); }
+      catch (e) { toastError(e); }
     };
   });
 }
 
-function ptIzgaraCiz() {
-  const tablo = ana.querySelector("table.pt");
-  if (!tablo || !PT.paket?.kayit) return;
-  const { gunler, kayit } = PT.paket;
-  const kapali = ptKapali();
-  const bugun = bugunStr();
-  const ozetSut = ptOzetSutunlari();
-  const satirlar = ptGorunen();
-  const genis = gunler.length + ozetSut.length + 1;
+function tsRenderGrid() {
+  const table = main.querySelector("table.ts");
+  if (!table || !TS.pkg?.record) return;
+  const { days, record } = TS.pkg;
+  const closed = tsClosed();
+  const today = todayStr();
+  const sumCols = tsSummaryColumns();
+  const rows = tsVisible();
+  const span = days.length + sumCols.length + 1;
 
-  let h = `<thead><tr><th class="s1">Personel</th><th class="s2">Ekip</th>`;
-  gunler.forEach((g, i) => {
-    const tip = kayit.gunler[g.gun];
-    h += `<th class="gun t-${tip} ${g.gun === bugun ? "bugun" : ""}" data-c="${i}" title="${GUN_TIP_AD[tip]}${kapali ? "" : " — değiştirmek için tıklayın"}">
-      <b>${g.no}</b><span>${g.kisa}</span></th>`;
+  let h = `<thead><tr><th class="c1">Employee</th><th class="c2">Crew</th>`;
+  days.forEach((g, i) => {
+    const type = record.days[g.day];
+    h += `<th class="day t-${type} ${g.day === today ? "today" : ""}" data-c="${i}" title="${DAY_TYPE_NAME[type]}${closed ? "" : " — click to change"}">
+      <b>${g.no}</b><span>${g.short}</span></th>`;
   });
-  h += ozetSut.map((o) => `<th class="oz">${o.b}</th>`).join("") + `<th class="islem"></th></tr></thead><tbody>`;
+  h += sumCols.map((o) => `<th class="sum">${o.label}</th>`).join("") + `<th class="op"></th></tr></thead><tbody>`;
 
-  let sonEkip = null, r = 0;
-  for (const s of satirlar) {
-    if (s.ekip !== sonEkip) {
-      sonEkip = s.ekip;
-      const e = kayit.ekipler[s.ekip];
-      const n = satirlar.filter((x) => x.ekip === s.ekip).length;
-      h += `<tr class="grup"><td class="s1" colspan="2">${s.ekip ? `${kacir(s.ekip)} · ${kacir(e?.ad || "")}` : "Ekipsiz"}</td>
-        <td colspan="${genis}">${e?.projeAd ? `${kacir(e.projeAd)} · ` : ""}${n} kişi${e?.yemekGunluk ? ` · yemek ${sayiMetni(e.yemekGunluk)} ${kacir(e.yemekPB)} / kişi / gün` : ""}</td></tr>`;
+  let lastCrew = null, r = 0;
+  for (const s of rows) {
+    if (s.crew !== lastCrew) {
+      lastCrew = s.crew;
+      const e = record.crews[s.crew];
+      const n = rows.filter((x) => x.crew === s.crew).length;
+      h += `<tr class="group"><td class="c1" colspan="2">${s.crew ? `${esc(s.crew)} · ${esc(e?.name || "")}` : "No crew"}</td>
+        <td colspan="${span}">${e?.projectName ? `${esc(e.projectName)} · ` : ""}${plural(n, "person", "people")}${e?.mealDaily ? ` · meals ${numText(e.mealDaily)} ${esc(e.mealCurrency)} / person / day` : ""}</td></tr>`;
     }
-    h += `<tr data-p="${kacir(s.personelKod)}"><td class="s1"><div class="kisi"><span class="ad">${kacir(s.ad)}</span>
-      <span class="alt">${kacir(s.personelKod)} · ${kacir(s.odemeTuru ? `${s.odemeTuru} ${sayiMetni(s.ucret)} ${s.paraBirimi}` : "maaş yok")}</span></div></td>
-      <td class="s2">${kacir(s.ekip || "—")}</td>`;
-    gunler.forEach((g, c) => {
-      h += `<td class="${ptHucreSinif(s, g.gun)}"><input class="h" data-r="${r}" data-c="${c}" data-g="${g.gun}" value="${kacir(s.hucre[g.gun] || "")}" ${kapali ? "readonly" : ""} maxlength="5" autocomplete="off"></td>`;
+    h += `<tr data-emp="${esc(s.employeeCode)}"><td class="c1"><div class="person"><span class="name">${esc(s.name)}</span>
+      <span class="sub">${esc(s.employeeCode)} · ${esc(s.payType ? `${s.payType} ${numText(s.pay)} ${s.currency}` : "no pay")}</span></div></td>
+      <td class="c2">${esc(s.crew || "—")}</td>`;
+    days.forEach((g, c) => {
+      h += `<td class="${tsCellClass(s, g.day)}"><input class="cin" data-r="${r}" data-c="${c}" data-day="${g.day}" value="${esc(s.cells[g.day] || "")}" ${closed ? "readonly" : ""} maxlength="5" autocomplete="off"></td>`;
     });
-    h += ozetSut.map((o) => `<td class="oz" data-o="${o.k}"></td>`).join("") +
-      `<td class="islem"><button class="sat-menu" title="Satır işlemleri">⋯</button></td></tr>`;
+    h += sumCols.map((o) => `<td class="sum" data-o="${o.k}"></td>`).join("") +
+      `<td class="op"><button class="row-menu" title="Row actions">⋯</button></td></tr>`;
     r += 1;
   }
-  if (!satirlar.length) {
-    h += `<tr><td colspan="${genis + 2}"><div class="bos"><div class="bs">${kayit.satirlar.length ? "Filtreye uyan kişi yok" : "Bu dönemde kimse yok"}</div>
-      <p>${kayit.satirlar.length ? "Ekip, proje ya da arama filtresini değiştirin." : "Sağ üstteki \"+ Kişi ekle\" ile kişi ekleyebilirsiniz."}</p></div></td></tr>`;
+  if (!rows.length) {
+    h += `<tr><td colspan="${span + 2}"><div class="empty"><div class="big">${record.rows.length ? "Nobody matches the filter" : "Nobody in this period"}</div>
+      <p>${record.rows.length ? "Change the crew, project or search filter." : "Add people with \"+ Add person\" at the top right."}</p></div></td></tr>`;
   }
-  h += `</tbody><tfoot><tr><td class="s1">Toplam · ${satirlar.length} kişi</td><td class="s2"></td>
-    ${gunler.map((g, i) => `<td class="gun-top" data-c="${i}"></td>`).join("")}
-    ${ozetSut.map((o) => `<td class="oz" data-ot="${o.k}"></td>`).join("")}<td></td></tr></tfoot>`;
-  tablo.innerHTML = h;
-  ptDegerleriTazele();
-  ptTabloBagla(tablo);
+  h += `</tbody><tfoot><tr><td class="c1">Total · ${plural(rows.length, "person", "people")}</td><td class="c2"></td>
+    ${days.map((g, i) => `<td class="day-total" data-c="${i}"></td>`).join("")}
+    ${sumCols.map((o) => `<td class="sum" data-ot="${o.k}"></td>`).join("")}<td></td></tr></tfoot>`;
+  table.innerHTML = h;
+  tsRefreshValues();
+  tsBindTable(table);
 }
 
-/** Hesaplanan hücreleri, toplamları ve paneli tablo baştan çizilmeden tazeler. */
-function ptDegerleriTazele() {
-  const tablo = ana.querySelector("table.pt");
-  if (!tablo) return;
-  const { kayit, hesap, gunler } = PT.paket;
-  const hesapMap = new Map(hesap.satirlar.map((x) => [x.personelKod, x]));
-  const ozetSut = ptOzetSutunlari();
-  const aktif = document.activeElement;
-  const gunTop = gunler.map(() => 0);
-  const alt = Object.fromEntries(ozetSut.map((o) => [o.k, o.saat ? 0 : {}]));
+/** Refreshes the calculated cells, the totals and the panel without redrawing the table. */
+function tsRefreshValues() {
+  const table = main.querySelector("table.ts");
+  if (!table) return;
+  const { calc, days } = TS.pkg;
+  const calcMap = new Map(calc.rows.map((x) => [x.employeeCode, x]));
+  const sumCols = tsSummaryColumns();
+  const active = document.activeElement;
+  const dayTotals = days.map(() => 0);
+  const foot = Object.fromEntries(sumCols.map((o) => [o.k, o.hours ? 0 : {}]));
 
-  tablo.querySelectorAll("tbody tr[data-p]").forEach((tr) => {
-    const s = ptSatir(tr.dataset.p);
-    const h = hesapMap.get(tr.dataset.p);
+  table.querySelectorAll("tbody tr[data-emp]").forEach((tr) => {
+    const s = tsRow(tr.dataset.emp);
+    const h = calcMap.get(tr.dataset.emp);
     if (!s || !h) return;
-    tr.querySelectorAll("input.h").forEach((inp) => {
-      const g = inp.dataset.g;
-      const v = s.hucre[g] || "";
-      if (inp !== aktif) inp.value = v;
+    tr.querySelectorAll("input.cin").forEach((inp) => {
+      const g = inp.dataset.day;
+      const v = s.cells[g] || "";
+      if (inp !== active) inp.value = v;
       inp.dataset.v = v;
       const td = inp.parentElement;
-      td.className = ptHucreSinif(s, g);
-      td.title = s.ekipGun[g] ? `Bu gün ekibi: ${s.ekipGun[g]} ${ptEkipAdi(s.ekipGun[g])}` : "";
-      if (/^\d/.test(v)) gunTop[+inp.dataset.c] += Number(v);
+      td.className = tsCellClass(s, g);
+      td.title = s.crewDays[g] ? `Crew on this day: ${s.crewDays[g]} ${tsCrewName(s.crewDays[g])}` : "";
+      if (/^\d/.test(v)) dayTotals[+inp.dataset.c] += Number(v);
     });
-    for (const o of ozetSut) {
+    for (const o of sumCols) {
       tr.querySelector(`[data-o="${o.k}"]`).innerHTML = o.f(h);
-      if (o.saat) alt[o.k] += o.saat(h);
-      else for (const [pb, v] of Object.entries(o.para(h) || {})) alt[o.k][pb] = (alt[o.k][pb] || 0) + v;
+      if (o.hours) foot[o.k] += o.hours(h);
+      else for (const [cur, v] of Object.entries(o.money(h) || {})) foot[o.k][cur] = (foot[o.k][cur] || 0) + v;
     }
-    tr.classList.toggle("uyarili", h.uyari.length > 0);
-    tr.querySelector(".s1").title = h.uyari.join("\n");
+    tr.classList.toggle("flagged", h.warnings.length > 0);
+    tr.querySelector(".c1").title = h.warnings.join("\n");
   });
-  tablo.querySelectorAll("tfoot .gun-top").forEach((td) => { const v = gunTop[+td.dataset.c]; td.textContent = v ? sayiMetni(v) : ""; });
-  for (const o of ozetSut) {
-    const td = tablo.querySelector(`tfoot [data-ot="${o.k}"]`);
-    if (td) td.innerHTML = o.saat ? sayiMetni(alt[o.k]) : toplamMetni(alt[o.k]);
+  table.querySelectorAll("tfoot .day-total").forEach((td) => { const v = dayTotals[+td.dataset.c]; td.textContent = v ? numText(v) : ""; });
+  for (const o of sumCols) {
+    const td = table.querySelector(`tfoot [data-ot="${o.k}"]`);
+    if (td) td.innerHTML = o.hours ? numText(foot[o.k]) : totalText(foot[o.k]);
   }
-  ptCekmeceTazele();
+  tsRefreshDrawer();
 }
 
-/** Hücre değişikliklerini sırayla kaydeder (hızlı yazımda yarış olmasın). */
-function ptKaydet(degisiklikler, mesaj) {
-  const donem = PT.paket.donem;
-  PT.kuyruk = PT.kuyruk.then(async () => {
+/** Saves cell changes one after another (so fast typing does not race). */
+function tsSave(changes, message) {
+  const period = TS.pkg.period;
+  TS.queue = TS.queue.then(async () => {
     try {
-      PT.paket = await api(`/puantaj/${donem}/hucre`, { method: "PUT", body: JSON.stringify({ degisiklikler }) });
-      ptDegerleriTazele();
-      if (mesaj) bildir(mesaj, "", "iyi");
+      TS.pkg = await api(`/timesheet/${period}/cells`, { method: "PUT", body: JSON.stringify({ changes }) });
+      tsRefreshValues();
+      if (message) toast(message, "", "good");
     } catch (e) {
-      hataBildir(e);
-      ptDegerleriTazele(); // geçersiz değeri geri al
-      const tablo = ana.querySelector("table.pt");
-      for (const d of degisiklikler) {
-        const inp = tablo?.querySelector(`tr[data-p="${d.personelKod}"] input[data-g="${d.gun}"]`);
+      toastError(e);
+      tsRefreshValues(); // undo the invalid value
+      const table = main.querySelector("table.ts");
+      for (const d of changes) {
+        const inp = table?.querySelector(`tr[data-emp="${d.employeeCode}"] input[data-day="${d.day}"]`);
         if (inp) inp.value = inp.dataset.v;
       }
     }
   });
-  return PT.kuyruk;
+  return TS.queue;
 }
 
-function ptTabloBagla(tablo) {
-  if (tablo.dataset.bagli) return;
-  tablo.dataset.bagli = "1";
-  const odak = (r, c) => { const i = tablo.querySelector(`input.h[data-r="${r}"][data-c="${c}"]`); if (i) { i.focus(); return true; } return false; };
+function tsBindTable(table) {
+  if (table.dataset.bound) return;
+  table.dataset.bound = "1";
+  const focus = (r, c) => { const i = table.querySelector(`input.cin[data-r="${r}"][data-c="${c}"]`); if (i) { i.focus(); return true; } return false; };
 
-  tablo.addEventListener("focusin", (ev) => { if (ev.target.matches("input.h")) ev.target.select(); });
+  table.addEventListener("focusin", (ev) => { if (ev.target.matches("input.cin")) ev.target.select(); });
 
-  tablo.addEventListener("keydown", (ev) => {
-    const inp = ev.target.closest("input.h");
+  table.addEventListener("keydown", (ev) => {
+    const inp = ev.target.closest("input.cin");
     if (!inp) return;
     const r = +inp.dataset.r, c = +inp.dataset.c;
-    const tamSecili = inp.selectionStart === 0 && inp.selectionEnd === inp.value.length;
+    const allSelected = inp.selectionStart === 0 && inp.selectionEnd === inp.value.length;
     if (ev.key === "Escape") { inp.value = inp.dataset.v; inp.blur(); return; }
-    // Son satırda Enter: alt hücre yok, kaydetmek için hücreden çık (change olayı tetiklenir).
-    if (ev.key === "Enter") { ev.preventDefault(); if (!odak(r + 1, c)) inp.blur(); }
-    else if (ev.key === "ArrowDown") { ev.preventDefault(); odak(r + 1, c); }
-    else if (ev.key === "ArrowUp") { ev.preventDefault(); odak(r - 1, c); }
-    else if (ev.key === "ArrowRight" && (tamSecili || inp.selectionStart === inp.value.length)) { ev.preventDefault(); odak(r, c + 1); }
-    else if (ev.key === "ArrowLeft" && (tamSecili || inp.selectionStart === 0)) { ev.preventDefault(); odak(r, c - 1); }
+    // Enter on the last row: there is no cell below, so leave the cell to save (fires the change event).
+    if (ev.key === "Enter") { ev.preventDefault(); if (!focus(r + 1, c)) inp.blur(); }
+    else if (ev.key === "ArrowDown") { ev.preventDefault(); focus(r + 1, c); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); focus(r - 1, c); }
+    else if (ev.key === "ArrowRight" && (allSelected || inp.selectionStart === inp.value.length)) { ev.preventDefault(); focus(r, c + 1); }
+    else if (ev.key === "ArrowLeft" && (allSelected || inp.selectionStart === 0)) { ev.preventDefault(); focus(r, c - 1); }
   });
 
-  tablo.addEventListener("change", (ev) => {
-    const inp = ev.target.closest("input.h");
-    if (!inp || ptKapali() || inp.value.trim() === inp.dataset.v) return;
-    ptKaydet([{ personelKod: inp.closest("tr").dataset.p, gun: inp.dataset.g, deger: inp.value }]);
+  table.addEventListener("change", (ev) => {
+    const inp = ev.target.closest("input.cin");
+    if (!inp || tsClosed() || inp.value.trim() === inp.dataset.v) return;
+    tsSave([{ employeeCode: inp.closest("tr").dataset.emp, day: inp.dataset.day, value: inp.value }]);
   });
 
-  // Excel'den kopyalanan blok: sekme ve satır sonlarına göre hücrelere dağıtılır.
-  tablo.addEventListener("paste", (ev) => {
-    const inp = ev.target.closest("input.h");
-    if (!inp || ptKapali()) return;
-    const metin = (ev.clipboardData?.getData("text") || "").replace(/\r/g, "").replace(/\n+$/, "");
-    if (!/[\t\n]/.test(metin)) return;
+  // A block copied from Excel: spread over the cells by tabs and line breaks.
+  table.addEventListener("paste", (ev) => {
+    const inp = ev.target.closest("input.cin");
+    if (!inp || tsClosed()) return;
+    const text = (ev.clipboardData?.getData("text") || "").replace(/\r/g, "").replace(/\n+$/, "");
+    if (!/[\t\n]/.test(text)) return;
     ev.preventDefault();
     const r0 = +inp.dataset.r, c0 = +inp.dataset.c;
-    const degisiklikler = [];
-    metin.split("\n").forEach((satir, i) => satir.split("\t").forEach((v, j) => {
-      const hedef = tablo.querySelector(`input.h[data-r="${r0 + i}"][data-c="${c0 + j}"]`);
-      if (hedef) degisiklikler.push({ personelKod: hedef.closest("tr").dataset.p, gun: hedef.dataset.g, deger: v.trim() });
+    const changes = [];
+    text.split("\n").forEach((line, i) => line.split("\t").forEach((v, j) => {
+      const target = table.querySelector(`input.cin[data-r="${r0 + i}"][data-c="${c0 + j}"]`);
+      if (target) changes.push({ employeeCode: target.closest("tr").dataset.emp, day: target.dataset.day, value: v.trim() });
     }));
-    if (degisiklikler.length) ptKaydet(degisiklikler, `${degisiklikler.length} hücre yapıştırıldı`);
+    if (changes.length) tsSave(changes, `${plural(changes.length, "cell")} pasted`);
   });
 
-  tablo.addEventListener("click", (ev) => {
-    const th = ev.target.closest("th.gun");
-    if (th) return ptGunMenusu(th);
-    const b = ev.target.closest(".sat-menu");
-    if (b) return ptSatirMenusu(b, b.closest("tr").dataset.p);
-    const kd = ev.target.closest("[data-kd]");
-    if (kd) return ptKesintiAc(kd, kd.closest("tr").dataset.p);
+  table.addEventListener("click", (ev) => {
+    const th = ev.target.closest("th.day");
+    if (th) return tsDayMenu(th);
+    const b = ev.target.closest(".row-menu");
+    if (b) return tsRowMenu(b, b.closest("tr").dataset.emp);
+    const dd = ev.target.closest("[data-dd]");
+    if (dd) return tsOpenDeduction(dd, dd.closest("tr").dataset.emp);
   });
 
-  tablo.addEventListener("contextmenu", (ev) => {
-    const td = ev.target.closest("td.hc");
-    if (!td || ptKapali()) return;
+  table.addEventListener("contextmenu", (ev) => {
+    const td = ev.target.closest("td.cell");
+    if (!td || tsClosed()) return;
     ev.preventDefault();
     const inp = td.querySelector("input");
-    ptHucreMenusu(td, inp.closest("tr").dataset.p, inp.dataset.g);
+    tsCellMenu(td, inp.closest("tr").dataset.emp, inp.dataset.day);
   });
 }
 
-function ptGunMenusu(th) {
-  const g = PT.paket.gunler[+th.dataset.c];
-  const tip = PT.paket.kayit.gunler[g.gun];
-  const gorunen = ptGorunen();
-  const ns = PT.paket.kayit.ayar.normalSaat;
-  const kapali = ptKapali();
-  const a = acilirAc(th, `<div class="acilir-bas">${g.no} ${PT.paket.ad.split(" · ")[0]} · ${g.kisa}</div>
-    <div class="secenek-grup">${["normal", "mesai", "tatil"].map((t) =>
-      `<button class="sec ${t === tip ? "aktif" : ""}" data-tip="${t}" ${kapali ? "disabled" : ""}>${GUN_TIP_AD[t]}</button>`).join("")}</div>
-    ${kapali ? `<div class="acilir-not">Dönem kapalı.</div>` : `
-    <div class="acilir-not">Aşağıdakiler görünen ${gorunen.length} kişiye uygulanır.</div>
-    <button class="og" data-is="doldur">Boş hücrelere ${sayiMetni(ns)} saat yaz</button>
-    <button class="og" data-is="kopyala" ${+th.dataset.c === 0 ? "disabled" : ""}>Önceki günü kopyala</button>
-    <button class="og tehlike" data-is="temizle">Sütunu temizle</button>`}`);
-  a.querySelectorAll("[data-tip]").forEach((b) => b.onclick = async () => {
-    acilirKapat();
-    try { PT.paket = await api(`/puantaj/${PT.paket.donem}/ayar`, { method: "PUT", body: JSON.stringify({ gunler: { [g.gun]: b.dataset.tip } }) }); ptIzgaraCiz(); }
-    catch (e) { hataBildir(e); }
+function tsDayMenu(th) {
+  const g = TS.pkg.days[+th.dataset.c];
+  const type = TS.pkg.record.days[g.day];
+  const visible = tsVisible();
+  const nh = TS.pkg.record.settings.normalHours;
+  const closed = tsClosed();
+  const a = openPop(th, `<div class="pop-head">${g.no} ${TS.pkg.name.split(" · ")[0]} · ${g.short}</div>
+    <div class="opt-group">${["normal", "overtime", "holiday"].map((t) =>
+      `<button class="sel ${t === type ? "active" : ""}" data-type="${t}" ${closed ? "disabled" : ""}>${DAY_TYPE_NAME[t]}</button>`).join("")}</div>
+    ${closed ? `<div class="pop-note">The period is closed.</div>` : `
+    <div class="pop-note">The actions below apply to the ${plural(visible.length, "person", "people")} shown.</div>
+    <button class="pop-item" data-do="fill">Write ${plural(numText(nh), "hour")} in empty cells</button>
+    <button class="pop-item" data-do="copy" ${+th.dataset.c === 0 ? "disabled" : ""}>Copy the previous day</button>
+    <button class="pop-item danger" data-do="clear">Clear the column</button>`}`);
+  a.querySelectorAll("[data-type]").forEach((b) => b.onclick = async () => {
+    closePop();
+    try { TS.pkg = await api(`/timesheet/${TS.pkg.period}/settings`, { method: "PUT", body: JSON.stringify({ days: { [g.day]: b.dataset.type } }) }); tsRenderGrid(); }
+    catch (e) { toastError(e); }
   });
-  const uygula = (fn, mesaj) => {
-    acilirKapat();
-    const d = gorunen.map((s) => fn(s)).filter(Boolean);
-    if (d.length) ptKaydet(d, mesaj); else bildir("Değişecek hücre yok", "", "");
+  const apply = (fn, message) => {
+    closePop();
+    const d = visible.map((s) => fn(s)).filter(Boolean);
+    if (d.length) tsSave(d, message); else toast("No cells to change", "", "");
   };
-  a.querySelector('[data-is="doldur"]')?.addEventListener("click", () =>
-    uygula((s) => (!s.hucre[g.gun] ? { personelKod: s.personelKod, gun: g.gun, deger: String(ns) } : null), "Boş hücreler dolduruldu"));
-  a.querySelector('[data-is="kopyala"]')?.addEventListener("click", () => {
-    const onceki = PT.paket.gunler[+th.dataset.c - 1].gun;
-    uygula((s) => ((s.hucre[onceki] || "") !== (s.hucre[g.gun] || "") ? { personelKod: s.personelKod, gun: g.gun, deger: s.hucre[onceki] || "" } : null), "Önceki gün kopyalandı");
+  a.querySelector('[data-do="fill"]')?.addEventListener("click", () =>
+    apply((s) => (!s.cells[g.day] ? { employeeCode: s.employeeCode, day: g.day, value: String(nh) } : null), "Empty cells filled"));
+  a.querySelector('[data-do="copy"]')?.addEventListener("click", () => {
+    const prev = TS.pkg.days[+th.dataset.c - 1].day;
+    apply((s) => ((s.cells[prev] || "") !== (s.cells[g.day] || "") ? { employeeCode: s.employeeCode, day: g.day, value: s.cells[prev] || "" } : null), "Previous day copied");
   });
-  a.querySelector('[data-is="temizle"]')?.addEventListener("click", () =>
-    uygula((s) => (s.hucre[g.gun] ? { personelKod: s.personelKod, gun: g.gun, deger: "" } : null), "Sütun temizlendi"));
+  a.querySelector('[data-do="clear"]')?.addEventListener("click", () =>
+    apply((s) => (s.cells[g.day] ? { employeeCode: s.employeeCode, day: g.day, value: "" } : null), "Column cleared"));
 }
 
-function ekipSecenekleri(secili) {
-  const kodlar = new Map(Object.entries(PT.paket.kayit.ekipler).map(([k, e]) => [k, e.ad]));
-  for (const e of kayitlar("ekip")) if (!kodlar.has(e.kod)) kodlar.set(e.kod, e.ad);
-  return [...kodlar].map(([k, ad]) => `<option value="${kacir(k)}" ${k === secili ? "selected" : ""}>${kacir(`${k} — ${ad}`)}</option>`).join("");
+function crewOptions(selected) {
+  const codes = new Map(Object.entries(TS.pkg.record.crews).map(([k, e]) => [k, e.name]));
+  for (const e of records("crews")) if (!codes.has(e.code)) codes.set(e.code, e.name);
+  return [...codes].map(([k, name]) => `<option value="${esc(k)}" ${k === selected ? "selected" : ""}>${esc(`${k} — ${name}`)}</option>`).join("");
 }
 
-async function ptEkipGun(kod, gunler, ekip) {
+async function tsCrewDays(code, days, crew) {
   try {
-    PT.paket = await api(`/puantaj/${PT.paket.donem}/ekip-gun`, { method: "PUT", body: JSON.stringify({ personelKod: kod, gunler, ekip }) });
-    ptDegerleriTazele();
-    bildir("Ekip ataması kaydedildi", `${gunler.length} gün · ${ekip || "kendi ekibi"}`, "iyi");
-  } catch (e) { hataBildir(e); }
+    TS.pkg = await api(`/timesheet/${TS.pkg.period}/crew-days`, { method: "PUT", body: JSON.stringify({ employeeCode: code, days, crew }) });
+    tsRefreshValues();
+    toast("Crew assignment saved", `${plural(days.length, "day")} · ${crew || "own crew"}`, "good");
+  } catch (e) { toastError(e); }
 }
 
-function ptHucreMenusu(td, kod, gun) {
-  const s = ptSatir(kod);
-  const g = PT.paket.gunler.find((x) => x.gun === gun);
-  const ekip = s.ekipGun[gun] || s.ekip;
-  const a = acilirAc(td, `<div class="acilir-bas">${kacir(s.ad)} · ${g.no} ${g.kisa}</div>
-    <div class="secenek-grup">${[["İ", "İzin"], ["R", "Rapor"], ["–", "Gelmedi"], ["", "Temizle"]].map(([v, ad]) =>
-      `<button class="sec" data-v="${v}">${v ? `<b>${v}</b> ` : ""}${ad}</button>`).join("")}</div>
-    <label class="acilir-et">Bu günün ekibi</label>
-    <select data-ekip><option value="">— ${kacir(s.ekip || "ekipsiz")} (kendi ekibi)</option>${ekipSecenekleri(ekip === s.ekip ? "" : ekip)}</select>
-    <label class="onay-kutu"><input type="checkbox" data-sona> Dönemin sonuna kadar uygula</label>
-    <button class="dg ufak bas" data-uygula>Ekibi uygula</button>`);
+function tsCellMenu(td, code, day) {
+  const s = tsRow(code);
+  const g = TS.pkg.days.find((x) => x.day === day);
+  const crew = s.crewDays[day] || s.crew;
+  const a = openPop(td, `<div class="pop-head">${esc(s.name)} · ${g.no} ${g.short}</div>
+    <div class="opt-group">${[["L", "Leave"], ["S", "Sick"], ["–", "Absent"], ["", "Clear"]].map(([v, name]) =>
+      `<button class="sel" data-v="${v}">${v ? `<b>${v}</b> ` : ""}${name}</button>`).join("")}</div>
+    <label class="pop-label">Crew on this day</label>
+    <select data-crew><option value="">— ${esc(s.crew || "no crew")} (own crew)</option>${crewOptions(crew === s.crew ? "" : crew)}</select>
+    <label class="check"><input type="checkbox" data-to-end> Apply until the end of the period</label>
+    <button class="btn small primary" data-apply>Apply crew</button>`);
   a.querySelectorAll("[data-v]").forEach((b) => b.onclick = () => {
-    acilirKapat();
-    ptKaydet([{ personelKod: kod, gun, deger: b.dataset.v }]);
+    closePop();
+    tsSave([{ employeeCode: code, day, value: b.dataset.v }]);
   });
-  a.querySelector("[data-uygula]").onclick = () => {
-    const sec = a.querySelector("[data-ekip]").value;
-    const gunler = a.querySelector("[data-sona]").checked ? PT.paket.gunler.map((x) => x.gun).filter((x) => x >= gun) : [gun];
-    acilirKapat();
-    ptEkipGun(kod, gunler, sec);
+  a.querySelector("[data-apply]").onclick = () => {
+    const sel = a.querySelector("[data-crew]").value;
+    const days = a.querySelector("[data-to-end]").checked ? TS.pkg.days.map((x) => x.day).filter((x) => x >= day) : [day];
+    closePop();
+    tsCrewDays(code, days, sel);
   };
 }
 
-function ptSatirMenusu(dugme, kod) {
-  const s = ptSatir(kod);
-  const h = PT.paket.hesap.satirlar.find((x) => x.personelKod === kod);
-  const ns = PT.paket.kayit.ayar.normalSaat;
-  const kapali = ptKapali();
-  const gunSec = (ad) => `<select data-${ad}>${PT.paket.gunler.map((g) => `<option value="${g.gun}">${g.no} ${g.kisa}</option>`).join("")}</select>`;
-  const a = acilirAc(dugme, `<div class="acilir-bas">${kacir(s.ad)}</div>
-    <div class="acilir-not">${kacir(s.odemeTuru ? `${s.odemeTuru} · ${sayiMetni(s.ucret)} ${s.paraBirimi}` : "Maaş girilmemiş")} — dönem açılırken kopyalandı.
-      ${h.saatDegeri ? `Saat değeri ${sayiMetni(h.saatDegeri)} ${kacir(h.paraBirimi)}.` : ""} ${s.kiraPayi ? `Kira payı ${sayiMetni(s.kiraPayi)} ${kacir(s.kiraPB)}.` : ""}</div>
-    ${h.uyari.map((u) => `<div class="acilir-not uyari">${kacir(u)}</div>`).join("")}
-    <a class="og" href="#d/personel/${kayitlar("personel").find((x) => x.kod === kod)?._id || ""}">Personel kartını aç</a>
-    ${kapali ? "" : `
-    <button class="og" data-is="doldur">Boş normal günlere ${sayiMetni(ns)} saat yaz</button>
-    <button class="og" data-is="ekip">Ekibi tarih aralığında değiştir…</button>
-    <div class="aralik" hidden>
-      <div class="ikili-kucuk">${gunSec("bas")}${gunSec("bit")}</div>
-      <select data-ekip><option value="">— kendi ekibi (${kacir(s.ekip || "ekipsiz")})</option>${ekipSecenekleri("")}</select>
-      <button class="dg ufak bas" data-uygula>Uygula</button></div>
-    <button class="og tehlike" data-is="temizle">Satırı temizle</button>
-    <button class="og tehlike" data-is="cikar">Dönemden çıkar</button>`}`);
-  const is = (ad, f) => a.querySelector(`[data-is="${ad}"]`)?.addEventListener("click", f);
-  is("doldur", () => {
-    acilirKapat();
-    const d = PT.paket.gunler.filter((g) => PT.paket.kayit.gunler[g.gun] === "normal" && !s.hucre[g.gun])
-      .map((g) => ({ personelKod: kod, gun: g.gun, deger: String(ns) }));
-    if (d.length) ptKaydet(d, `${d.length} gün dolduruldu`); else bildir("Boş normal gün yok", "", "");
+function tsRowMenu(button, code) {
+  const s = tsRow(code);
+  const h = TS.pkg.calc.rows.find((x) => x.employeeCode === code);
+  const nh = TS.pkg.record.settings.normalHours;
+  const closed = tsClosed();
+  const daySelect = (name) => `<select data-${name}>${TS.pkg.days.map((g) => `<option value="${g.day}">${g.no} ${g.short}</option>`).join("")}</select>`;
+  const a = openPop(button, `<div class="pop-head">${esc(s.name)}</div>
+    <div class="pop-note">${esc(s.payType ? `${s.payType} · ${numText(s.pay)} ${s.currency}` : "No pay entered")} — copied when the period was opened.
+      ${h.hourlyValue ? `Hourly value ${numText(h.hourlyValue)} ${esc(h.currency)}.` : ""} ${s.rentShare ? `Rent share ${numText(s.rentShare)} ${esc(s.rentCurrency)}.` : ""}</div>
+    ${h.warnings.map((u) => `<div class="pop-note warn">${esc(u)}</div>`).join("")}
+    <a class="pop-item" href="#d/employees/${records("employees").find((x) => x.code === code)?._id || ""}">Open the employee card</a>
+    ${closed ? "" : `
+    <button class="pop-item" data-do="fill">Write ${plural(numText(nh), "hour")} in empty normal days</button>
+    <button class="pop-item" data-do="crew">Change the crew for a date range…</button>
+    <div class="range" hidden>
+      <div class="pair-sm">${daySelect("from")}${daySelect("to")}</div>
+      <select data-crew><option value="">— own crew (${esc(s.crew || "no crew")})</option>${crewOptions("")}</select>
+      <button class="btn small primary" data-apply>Apply</button></div>
+    <button class="pop-item danger" data-do="clear">Clear the row</button>
+    <button class="pop-item danger" data-do="remove">Remove from the period</button>`}`);
+  const on = (name, f) => a.querySelector(`[data-do="${name}"]`)?.addEventListener("click", f);
+  on("fill", () => {
+    closePop();
+    const d = TS.pkg.days.filter((g) => TS.pkg.record.days[g.day] === "normal" && !s.cells[g.day])
+      .map((g) => ({ employeeCode: code, day: g.day, value: String(nh) }));
+    if (d.length) tsSave(d, `${plural(d.length, "day")} filled`); else toast("No empty normal days", "", "");
   });
-  is("ekip", () => {
-    const ar = a.querySelector(".aralik");
+  on("crew", () => {
+    const ar = a.querySelector(".range");
     ar.hidden = false;
-    ar.querySelector("[data-bit]").value = PT.paket.gunler.at(-1).gun;
-    ar.querySelector("[data-uygula]").onclick = () => {
-      const bas = ar.querySelector("[data-bas]").value, bit = ar.querySelector("[data-bit]").value;
-      if (bas > bit) return bildir("Tarih aralığı ters", "Başlangıç günü bitişten sonra olamaz.", "hata");
-      const gunler = PT.paket.gunler.map((g) => g.gun).filter((g) => g >= bas && g <= bit);
-      acilirKapat();
-      ptEkipGun(kod, gunler, ar.querySelector("[data-ekip]").value);
+    ar.querySelector("[data-to]").value = TS.pkg.days.at(-1).day;
+    ar.querySelector("[data-apply]").onclick = () => {
+      const from = ar.querySelector("[data-from]").value, to = ar.querySelector("[data-to]").value;
+      if (from > to) return toast("The date range is reversed", "The start day cannot be after the end day.", "error");
+      const days = TS.pkg.days.map((g) => g.day).filter((g) => g >= from && g <= to);
+      closePop();
+      tsCrewDays(code, days, ar.querySelector("[data-crew]").value);
     };
   });
-  is("temizle", async () => {
-    acilirKapat();
-    const d = Object.keys(s.hucre).map((g) => ({ personelKod: kod, gun: g, deger: "" }));
+  on("clear", async () => {
+    closePop();
+    const d = Object.keys(s.cells).map((g) => ({ employeeCode: code, day: g, value: "" }));
     if (!d.length) return;
-    if (await onay("Satır temizlensin mi?", `${s.ad} için girilmiş ${d.length} hücre silinecek.`, "Temizle")) ptKaydet(d, "Satır temizlendi");
+    if (await confirmBox("Clear this row?", `${plural(d.length, "cell")} entered for ${s.name} will be deleted.`, "Clear")) tsSave(d, "Row cleared");
   });
-  is("cikar", async () => {
-    acilirKapat();
-    if (!(await onay("Dönemden çıkarılsın mı?", `${s.ad} bu dönemin puantajından çıkarılacak. Personel kaydı silinmez.`, "Çıkar"))) return;
-    try { PT.paket = await api(`/puantaj/${PT.paket.donem}/satir/${encodeURIComponent(kod)}`, { method: "DELETE" }); ptIzgaraCiz(); }
-    catch (e) { hataBildir(e); }
+  on("remove", async () => {
+    closePop();
+    if (!(await confirmBox("Remove from the period?", `${s.name} will be removed from this period's timesheet. The employee record is not deleted.`, "Remove"))) return;
+    try { TS.pkg = await api(`/timesheet/${TS.pkg.period}/row/${encodeURIComponent(code)}`, { method: "DELETE" }); tsRenderGrid(); }
+    catch (e) { toastError(e); }
   });
 }
 
-/* --- yan panel: istatistikler, mesai ayarları, hesap makinesi --- */
+/* --- side panel: statistics, overtime settings, calculator --- */
 
-function ptCekmeceCiz() {
-  const c = ana.querySelector(".cekmece");
+function tsRenderDrawer() {
+  const c = main.querySelector(".drawer");
   if (!c) return;
-  let kapali = [];
-  try { kapali = JSON.parse(localStorage.getItem("kadro-cekmece-bolum") || "[]"); } catch { /* yoksay */ }
-  const bolum = (id, ad) => `<details data-b="${id}" ${kapali.includes(id) ? "" : "open"}><summary>${ad}</summary><div id="pt-${id}"></div></details>`;
-  c.innerHTML = `<button class="cekmece-sap" title="Paneli aç / kapat"><span class="ok-i">${ana.querySelector(".pt-duzen").classList.contains("cekmece-acik") ? "›" : "‹"}</span><span>Panel</span></button>
-    <div class="cekmece-ic">${bolum("ist", "İstatistikler")}${bolum("mesai", "Mesai Ayarları")}${bolum("hm", "Hesap Makinesi")}</div>`;
-  c.querySelector(".cekmece-sap").onclick = () => {
-    const d = ana.querySelector(".pt-duzen");
-    const acik = d.classList.toggle("cekmece-acik");
-    try { localStorage.setItem("kadro-cekmece", acik ? "1" : "0"); } catch { /* yoksay */ }
-    c.querySelector(".ok-i").textContent = acik ? "›" : "‹";
+  let closed = [];
+  try { closed = JSON.parse(localStorage.getItem("kadro-drawer-sections") || "[]"); } catch { /* ignore */ }
+  const section = (id, name) => `<details data-s="${id}" ${closed.includes(id) ? "" : "open"}><summary>${name}</summary><div id="ts-${id}"></div></details>`;
+  c.innerHTML = `<button class="drawer-tab" title="Open / close the panel"><span class="tab-arrow">${main.querySelector(".ts-layout").classList.contains("drawer-open") ? "›" : "‹"}</span><span>Panel</span></button>
+    <div class="drawer-body">${section("stats", "Statistics")}${section("overtime", "Overtime Settings")}${section("calc", "Calculator")}</div>`;
+  c.querySelector(".drawer-tab").onclick = () => {
+    const d = main.querySelector(".ts-layout");
+    const open = d.classList.toggle("drawer-open");
+    try { localStorage.setItem("kadro-drawer", open ? "1" : "0"); } catch { /* ignore */ }
+    c.querySelector(".tab-arrow").textContent = open ? "›" : "‹";
   };
   c.querySelectorAll("details").forEach((d) => d.addEventListener("toggle", () => {
-    const k = [...c.querySelectorAll("details:not([open])")].map((x) => x.dataset.b);
-    try { localStorage.setItem("kadro-cekmece-bolum", JSON.stringify(k)); } catch { /* yoksay */ }
+    const k = [...c.querySelectorAll("details:not([open])")].map((x) => x.dataset.s);
+    try { localStorage.setItem("kadro-drawer-sections", JSON.stringify(k)); } catch { /* ignore */ }
   }));
-  ptMesaiCiz();
-  hesapMakinesiCiz(c.querySelector("#pt-hm"));
-  ptCekmeceTazele();
+  tsRenderOvertime();
+  renderCalculator(c.querySelector("#ts-calc"));
+  tsRefreshDrawer();
 }
 
-function ptCekmeceTazele() {
-  const k = document.getElementById("pt-ist");
-  if (!k || !PT.paket?.hesap) return;
-  const { ozet, ekipOzet } = PT.paket.hesap;
-  const sat = (ad, deger, sayi, sinif = "") =>
-    `<div class="ist-sat ${sinif}"><span>${ad}</span><b ${sayi !== undefined ? `data-deger="${sayi}" title="Hesap makinesine aktar"` : ""}>${deger}</b></div>`;
-  const paraSat = (ad, t, sinif) => {
+function tsRefreshDrawer() {
+  const k = document.getElementById("ts-stats");
+  if (!k || !TS.pkg?.calc) return;
+  const { summary, crewSummary } = TS.pkg.calc;
+  const row = (name, value, n, cls = "") =>
+    `<div class="stat-row ${cls}"><span>${name}</span><b ${n !== undefined ? `data-value="${n}" title="Send to the calculator"` : ""}>${value}</b></div>`;
+  const moneyRow = (name, t, cls) => {
     const p = Object.entries(t || {}).filter(([, v]) => v);
-    if (!p.length) return sat(ad, "—");
-    return p.map(([pb, v], i) => sat(i ? "" : ad, `${sayiMetni(v)} ${pb}`, v, sinif)).join("");
+    if (!p.length) return row(name, "—");
+    return p.map(([cur, v], i) => row(i ? "" : name, `${numText(v)} ${cur}`, v, cls)).join("");
   };
+  const rates = TS.pkg.record.settings.rates || S.status?.rates;
   k.innerHTML = `
-    ${sat("Toplam çalışma saati", sayiMetni(ozet.toplamSaat), ozet.toplamSaat, "buyuk")}
-    ${sat("Normal saat", sayiMetni(ozet.normal), ozet.normal)}
-    ${sat("Mesai saati", sayiMetni(ozet.mesai), ozet.mesai)}
-    ${sat("Eksik iş saati", sayiMetni(ozet.eksik), ozet.eksik, ozet.eksik ? "kotu" : "")}
-    ${sat("Kişi / ekip", `${ozet.kisi} / ${ozet.ekip}`)}
-    ${sat("Çalışılan kişi-gün", sayiMetni(ozet.calisilanGun), ozet.calisilanGun)}
-    ${sat("İzin · rapor · gelmedi", `${ozet.izin} · ${ozet.rapor} · ${ozet.gelmedi} gün`)}
-    <div class="ist-ayrac"></div>
-    ${paraSat("Hakediş", ozet.hakedis)}
-    ${paraSat("Kesinti", ozet.kesinti)}
-    ${ozet.kural >= 2 && Object.keys(ozet.kesinti).length ? `${paraSat("· günlük maaş", ozet.kesintiMaas, "alt")}${paraSat("· kira payı", ozet.kesintiKira, "alt")}${paraSat("· yemek", ozet.kesintiYemek, "alt")}` : ""}
-    ${paraSat("Mesai ücreti", ozet.mesaiTutar)}
-    ${paraSat("Avans", ozet.avans)}
-    ${paraSat("Toplam ödenecek (net)", ozet.net, "buyuk")}
-    ${anaKarsilik(ozet.net, PT.paket.kayit.ayar.kur || S.durum?.kur) ? sat("", anaKarsilik(ozet.net, PT.paket.kayit.ayar.kur || S.durum?.kur), undefined, "alt") : ""}
-    ${Object.keys(ozet.aySonu).length ? paraSat("Ay sonu ödenecek", ozet.aySonu, "vurgu") : ""}
-    <div class="ist-ayrac"></div>
-    ${paraSat("Yemek", ozet.yemek)}
-    ${paraSat("Kira payı", ozet.kira)}
-    ${ozet.maassiz ? `<div class="acilir-not uyari">${ozet.maassiz} kişinin maaşı girilmemiş; hakedişe dahil değil.</div>` : ""}
-    ${ekipOzet.length ? `<div class="ist-alt">Ekip bazında</div>${ekipOzet.map((e) =>
-      `<div class="ist-ekip"><span><b>${kacir(e.kod)}</b> ${kacir(e.ad)}</span><span>${e.kisiGun} kişi-gün · ${sayiMetni(e.saat)} sa${Object.keys(e.yemek).length ? ` · yemek ${toplamMetni(e.yemek)}` : ""}</span></div>`).join("")}` : ""}`;
-  k.querySelectorAll("[data-deger]").forEach((b) => b.onclick = () => hesapMakinesineEkle(b.dataset.deger));
+    ${row("Total hours worked", numText(summary.totalHours), summary.totalHours, "big")}
+    ${row("Normal hours", numText(summary.normal), summary.normal)}
+    ${row("Overtime hours", numText(summary.overtime), summary.overtime)}
+    ${row("Short hours", numText(summary.short), summary.short, summary.short ? "bad" : "")}
+    ${row("People / crews", `${summary.people} / ${summary.crews}`)}
+    ${row("Person-days worked", numText(summary.workedDays), summary.workedDays)}
+    ${row("Leave · sick · absent", `${summary.leave} · ${summary.sick} · ${plural(summary.absent, "day")}`)}
+    <div class="stat-sep"></div>
+    ${moneyRow("Earnings", summary.earnings)}
+    ${moneyRow("Deductions", summary.deduction)}
+    ${summary.rule >= 2 && Object.keys(summary.deduction).length ? `${moneyRow("· daily salary", summary.deductionSalary, "sub")}${moneyRow("· rent share", summary.deductionRent, "sub")}${moneyRow("· meals", summary.deductionMeals, "sub")}` : ""}
+    ${moneyRow("Overtime pay", summary.overtimePay)}
+    ${moneyRow("Advances", summary.advance)}
+    ${moneyRow("Total to pay (net)", summary.net, "big")}
+    ${baseEquivalent(summary.net, rates) ? row("", baseEquivalent(summary.net, rates), undefined, "sub") : ""}
+    ${Object.keys(summary.monthEnd).length ? moneyRow("Due at month end", summary.monthEnd, "hl") : ""}
+    <div class="stat-sep"></div>
+    ${moneyRow("Meals", summary.meals)}
+    ${moneyRow("Rent share", summary.rent)}
+    ${summary.unpaid ? `<div class="pop-note warn">${plural(summary.unpaid, "person", "people")} have no pay entered; they are not in the earnings.</div>` : ""}
+    ${crewSummary.length ? `<div class="stat-sub">By crew</div>${crewSummary.map((e) =>
+      `<div class="stat-crew"><span><b>${esc(e.code)}</b> ${esc(e.name)}</span><span>${plural(e.personDays, "person-day")} · ${numText(e.hours)} h${Object.keys(e.meals).length ? ` · meals ${totalText(e.meals)}` : ""}</span></div>`).join("")}` : ""}`;
+  k.querySelectorAll("[data-value]").forEach((b) => b.onclick = () => addToCalculator(b.dataset.value));
 }
 
-function ptMesaiCiz() {
-  const k = document.getElementById("pt-mesai");
+function tsRenderOvertime() {
+  const k = document.getElementById("ts-overtime");
   if (!k) return;
-  const { ayar, gunler } = PT.paket.kayit;
-  const kural = PT.paket.kayit.kural || 1;
-  const kapali = ptKapali();
-  const dis = kapali ? "disabled" : "";
-  const ucretModu = kural >= 2 && ayar.mesaiModu !== "carpan";
-  const mu = ayar.mesaiUcreti || {};
+  const { settings, days } = TS.pkg.record;
+  const rule = TS.pkg.record.rule || 1;
+  const closed = tsClosed();
+  const dis = closed ? "disabled" : "";
+  const rateMode = rule >= 2 && settings.overtimeMode !== "multiplier";
+  const or = settings.overtimeRate || {};
 
   k.innerHTML = `
-    ${kural >= 2 ? `
-    <label class="pn-alan"><span>Mesai hesabı</span><select data-a="mesaiModu" ${dis}>
-      <option value="ucret" ${ucretModu ? "selected" : ""}>Sabit saatlik ücret</option>
-      <option value="carpan" ${!ucretModu ? "selected" : ""}>Saat değeri × çarpan</option></select></label>
-    ${ucretModu ? ["EUR", "TRY", "RSD"].map((pb) => `<label class="pn-alan"><span>Mesai ücreti · ${pb} / saat</span>
-      <input type="number" step="0.01" min="0" data-mu="${pb}" value="${mu[pb] ?? ""}" placeholder="girilmedi" ${dis}></label>`).join("")
-      : `<label class="pn-alan"><span>Mesai çarpanı</span><input type="number" step="0.05" min="1" max="5" data-a="mesaiCarpani" value="${ayar.mesaiCarpani}" ${dis}></label>`}
-    ${ucretModu ? `<div class="pn-not">Personel kartında kişiye özel mesai ücreti girilmişse o kullanılır. Ücret bu döneme aittir; sonraki dönem buradan devralır.</div>` : ""}
-    ` : `<label class="pn-alan"><span>Mesai çarpanı</span><input type="number" step="0.05" min="1" max="5" data-a="mesaiCarpani" value="${ayar.mesaiCarpani}" ${dis}></label>`}
-    <label class="pn-alan"><span>Normal gün (saat)</span><input type="number" step="0.5" min="1" max="24" data-a="normalSaat" value="${ayar.normalSaat}" ${dis}></label>
-    <label class="onay-kutu"><input type="checkbox" data-a="haftaIciAsim" ${ayar.haftaIciAsim ? "checked" : ""} ${dis}> Normal günde ${sayiMetni(ayar.normalSaat)} saati aşan kısım mesai sayılsın</label>
-    <label class="onay-kutu"><input type="checkbox" data-a="tatilMesai" ${ayar.tatilMesai ? "checked" : ""} ${dis}> Tatil gününde (Pazar vb.) çalışılan saat mesai sayılsın</label>
-    ${kural >= 2 ? `<label class="onay-kutu"><input type="checkbox" data-a="eksikSaatKesinti" ${ayar.eksikSaatKesinti ? "checked" : ""} ${dis}> Aylıkçının girilmiş eksik saatleri de kesilsin (ör. 8 yerine 5 saat)</label>
-    <div class="pn-not"><b>Kesinti:</b> sadece <b>–</b> (gelmedi) yazılan gün kesilir. Aylıkçıdan günlük maaş (maaş × 12 ÷ 365) + günlük kira payı + günlük yemek,
-      saatlikçiden kira payı + yemek. Boş hücre, izin, rapor ve işe giriş öncesi günler kesinti doğurmaz.</div>`
-    : `<div class="pn-kural">Bu dönem <b>eski hesap kurallarıyla</b> açıldı: mesai çarpanla, kesinti eksik saat × saat değeri, boş geçmiş günler eksik sayılır.
-      ${kapali ? "Dönem kapalı; rakamları değişmez." : `<button class="dg ufak bas" data-is="kural">Yeni kurallara geçir</button>`}</div>`}
-    ${kural === 2 ? `<div class="pn-kural">Bu dönem <b>kur çevirisi olmadan</b> açıldı: maaştan farklı para birimindeki yemek, kira ve avans maaştan düşülmez.
-      ${kapali ? "Dönem kapalı; rakamları değişmez." : `<button class="dg ufak bas" data-is="kural">Yeni kurallara geçir</button>`}</div>` : ""}
-    ${kural >= 3 ? `<div class="pn-not"><b>Kur (bu dönem):</b> ${kacir(kurMetni(ayar.kur))}. Maaştan farklı para birimindeki yemek, kira ve avans bu kurla çevrilip düşülür.
-      ${!kapali && S.durum?.kur && !kurEsit(S.durum.kur, ayar.kur)
-        ? `<br>Ayarlar'daki güncel kur farklı (${kacir(kurMetni(S.durum.kur))}). <button class="dg ufak" data-is="kurAl">Güncel kuru al</button>` : ""}</div>` : ""}
-    <div class="pn-not">Mesai günündeki saatlerin tamamı mesaidir. Gün tipini değiştirmek için takvimde gün başlığına tıklayın.</div>
-    ${kapali ? `<div class="pn-not">Dönem kapalı; ayarlar kilitli.</div>` : `
-    <div class="pn-dugmeler">
-      <button class="dg ufak" data-gt="ct">Cumartesiler mesai</button>
-      <button class="dg ufak" data-gt="pz">Pazarlar tatil</button>
-      <button class="dg ufak" data-gt="sifirla">Varsayılana dön</button>
+    ${rule >= 2 ? `
+    <label class="ps-field"><span>Overtime calculation</span><select data-a="overtimeMode" ${dis}>
+      <option value="rate" ${rateMode ? "selected" : ""}>Fixed hourly rate</option>
+      <option value="multiplier" ${!rateMode ? "selected" : ""}>Hourly value × multiplier</option></select></label>
+    ${rateMode ? ["EUR", "TRY", "RSD"].map((cur) => `<label class="ps-field"><span>Overtime rate · ${cur} / hour</span>
+      <input type="number" step="0.01" min="0" data-or="${cur}" value="${or[cur] ?? ""}" placeholder="not entered" ${dis}></label>`).join("")
+      : `<label class="ps-field"><span>Overtime multiplier</span><input type="number" step="0.05" min="1" max="5" data-a="overtimeMultiplier" value="${settings.overtimeMultiplier}" ${dis}></label>`}
+    ${rateMode ? `<div class="ps-note">If a personal overtime rate is entered on the employee card, that one is used. The rate belongs to this period; the next period takes it over from here.</div>` : ""}
+    ` : `<label class="ps-field"><span>Overtime multiplier</span><input type="number" step="0.05" min="1" max="5" data-a="overtimeMultiplier" value="${settings.overtimeMultiplier}" ${dis}></label>`}
+    <label class="ps-field"><span>Normal day (hours)</span><input type="number" step="0.5" min="1" max="24" data-a="normalHours" value="${settings.normalHours}" ${dis}></label>
+    <label class="check"><input type="checkbox" data-a="weekdayExcess" ${settings.weekdayExcess ? "checked" : ""} ${dis}> Hours above ${numText(settings.normalHours)} on a normal day count as overtime</label>
+    <label class="check"><input type="checkbox" data-a="holidayAsOvertime" ${settings.holidayAsOvertime ? "checked" : ""} ${dis}> Hours worked on a holiday (Sunday etc.) count as overtime</label>
+    ${rule >= 2 ? `<label class="check"><input type="checkbox" data-a="deductShortHours" ${settings.deductShortHours ? "checked" : ""} ${dis}> Also deduct short hours entered for monthly staff (e.g. 5 hours instead of 8)</label>
+    <div class="ps-note"><b>Deductions:</b> only days marked <b>–</b> (absent) are deducted. Monthly staff lose the daily salary (salary × 12 ÷ 365) + the daily rent share + daily meals,
+      hourly staff the rent share + meals. Empty cells, leave, sick days and days before starting work cause no deduction.</div>`
+    : `<div class="ps-rule">This period was opened with the <b>old calculation rules</b>: overtime by multiplier, deductions as short hours × hourly value, empty past days count as short.
+      ${closed ? "The period is closed; its figures do not change." : `<button class="btn small primary" data-do="rule">Move to the new rules</button>`}</div>`}
+    ${rule === 2 ? `<div class="ps-rule">This period was opened <b>without currency conversion</b>: meals, rent and advances in a currency other than the salary's are not deducted from pay.
+      ${closed ? "The period is closed; its figures do not change." : `<button class="btn small primary" data-do="rule">Move to the new rules</button>`}</div>` : ""}
+    ${rule >= 3 ? `<div class="ps-note"><b>Rates (this period):</b> ${esc(ratesText(settings.rates))}. Meals, rent and advances in a currency other than the salary's are converted at these rates and deducted.
+      ${!closed && S.status?.rates && !ratesEqual(S.status.rates, settings.rates)
+        ? `<br>The current rates in Settings differ (${esc(ratesText(S.status.rates))}). <button class="btn small" data-do="takeRates">Use the current rates</button>` : ""}</div>` : ""}
+    <div class="ps-note">All hours on an overtime day are overtime. Click a day header in the calendar to change its type.</div>
+    ${closed ? `<div class="ps-note">The period is closed; the settings are locked.</div>` : `
+    <div class="ps-buttons">
+      <button class="btn small" data-dt="sat">Saturdays overtime</button>
+      <button class="btn small" data-dt="sun">Sundays holiday</button>
+      <button class="btn small" data-dt="reset">Back to default</button>
     </div>`}
-    <div class="pn-not">Bu dönem: ${Object.values(gunler).filter((t) => t === "normal").length} normal, ${Object.values(gunler).filter((t) => t === "mesai").length} mesai, ${Object.values(gunler).filter((t) => t === "tatil").length} tatil günü · ayın iş günü ${PT.paket.hesap.ayIsGunu}.</div>`;
+    <div class="ps-note">This period: ${Object.values(days).filter((t) => t === "normal").length} normal, ${Object.values(days).filter((t) => t === "overtime").length} overtime, ${Object.values(days).filter((t) => t === "holiday").length} holiday days · workdays in the month ${TS.pkg.calc.monthWorkdays}.</div>`;
 
-  const kaydet = async (govde) => {
-    try { PT.paket = await api(`/puantaj/${PT.paket.donem}/ayar`, { method: "PUT", body: JSON.stringify(govde) }); return true; }
-    catch (e) { hataBildir(e); return false; }
+  const save = async (body) => {
+    try { TS.pkg = await api(`/timesheet/${TS.pkg.period}/settings`, { method: "PUT", body: JSON.stringify(body) }); return true; }
+    catch (e) { toastError(e); return false; }
   };
   k.querySelectorAll("[data-a]").forEach((g) => g.addEventListener("change", async () => {
     const v = g.type === "checkbox" ? g.checked : g.value;
-    if (await kaydet({ ayar: { [g.dataset.a]: v } })) { ptDegerleriTazele(); ptMesaiCiz(); bildir("Mesai ayarı kaydedildi", "", "iyi"); }
+    if (await save({ settings: { [g.dataset.a]: v } })) { tsRefreshValues(); tsRenderOvertime(); toast("Overtime setting saved", "", "good"); }
   }));
-  k.querySelectorAll("[data-mu]").forEach((g) => g.addEventListener("change", async () => {
-    if (await kaydet({ ayar: { mesaiUcreti: { [g.dataset.mu]: g.value } } })) {
-      ptDegerleriTazele(); ptMesaiCiz(); bildir("Mesai ücreti kaydedildi", `${g.dataset.mu}: ${g.value || "silindi"}`, "iyi");
+  k.querySelectorAll("[data-or]").forEach((g) => g.addEventListener("change", async () => {
+    if (await save({ settings: { overtimeRate: { [g.dataset.or]: g.value } } })) {
+      tsRefreshValues(); tsRenderOvertime(); toast("Overtime rate saved", `${g.dataset.or}: ${g.value || "removed"}`, "good");
     }
   }));
-  k.querySelector('[data-is="kural"]')?.addEventListener("click", async () => {
-    const ok = await onay("Dönem yeni kurallara geçirilsin mi?",
-      "Mesai sabit saatlik ücretle hesaplanır; sadece \"–\" (gelmedi) yazılan günler kesilir (günlük maaş + kira payı + yemek); " +
-      "boş günler ve işe giriş öncesi kesinti doğurmaz; yemek parası dönemin her günü için önden sayılır; " +
-      "maaştan farklı para birimindeki yemek, kira ve avans Ayarlar'daki kurla çevrilip düşülür. Bu işlem geri alınamaz.", "Yeni kurallara geçir");
-    if (ok && await kaydet({ kuralGuncelle: true })) { ptIzgaraCiz(); ptMesaiCiz(); bildir("Dönem yeni kurallara geçirildi", "Mesai ücretlerini panelden kontrol edin.", "iyi"); }
+  k.querySelector('[data-do="rule"]')?.addEventListener("click", async () => {
+    const ok = await confirmBox("Move the period to the new rules?",
+      "Overtime is paid at a fixed hourly rate; only days marked \"–\" (absent) are deducted (daily salary + rent share + meals); " +
+      "empty days and days before starting work cause no deduction; the meal allowance is counted in advance for every day of the period; " +
+      "meals, rent and advances in a currency other than the salary's are converted at the rates in Settings and deducted. This cannot be undone.", "Move to the new rules");
+    if (ok && await save({ upgradeRule: true })) { tsRenderGrid(); tsRenderOvertime(); toast("The period now uses the new rules", "Check the overtime rates in the panel.", "good"); }
   });
-  k.querySelector('[data-is="kurAl"]')?.addEventListener("click", async () => {
-    if (await kaydet({ ayar: { kur: "guncel" } })) { ptDegerleriTazele(); ptMesaiCiz(); bildir("Dönemin kuru güncellendi", kurMetni(PT.paket.kayit.ayar.kur), "iyi"); }
+  k.querySelector('[data-do="takeRates"]')?.addEventListener("click", async () => {
+    if (await save({ settings: { rates: "current" } })) { tsRefreshValues(); tsRenderOvertime(); toast("The period's rates were updated", ratesText(TS.pkg.record.settings.rates), "good"); }
   });
-  k.querySelectorAll("[data-gt]").forEach((b) => b.onclick = async () => {
-    const yeni = {};
-    for (const g of PT.paket.gunler) {
-      if (b.dataset.gt === "ct" && g.kisa === "Ct") yeni[g.gun] = "mesai";
-      if (b.dataset.gt === "pz" && g.kisa === "Pz") yeni[g.gun] = "tatil";
-      if (b.dataset.gt === "sifirla") yeni[g.gun] = g.kisa === "Ct" ? "mesai" : g.kisa === "Pz" ? "tatil" : "normal";
+  k.querySelectorAll("[data-dt]").forEach((b) => b.onclick = async () => {
+    const next = {};
+    for (const g of TS.pkg.days) {
+      if (b.dataset.dt === "sat" && g.short === "Sa") next[g.day] = "overtime";
+      if (b.dataset.dt === "sun" && g.short === "Su") next[g.day] = "holiday";
+      if (b.dataset.dt === "reset") next[g.day] = g.short === "Sa" ? "overtime" : g.short === "Su" ? "holiday" : "normal";
     }
-    if (await kaydet({ gunler: yeni })) { ptIzgaraCiz(); ptMesaiCiz(); }
+    if (await save({ days: next })) { tsRenderGrid(); tsRenderOvertime(); }
   });
 }
 
-/* --- hesap makinesi --- */
+/* --- calculator --- */
 
-function hesapMakinesiCiz(kutu) {
-  if (!kutu) return;
-  kutu.innerHTML = `<input class="hm-ekran" placeholder="0" spellcheck="false">
-    <div class="hm-sonuc"></div>
-    <div class="hm-tuslar">${["C", "(", ")", "÷", "7", "8", "9", "×", "4", "5", "6", "−", "1", "2", "3", "+", "0", ",", "⌫", "="]
-      .map((t) => `<button class="${/[0-9,]/.test(t) ? "" : "islem"} ${t === "=" ? "esit" : ""}">${t}</button>`).join("")}</div>
-    <div class="pn-not">İstatistiklerdeki bir değere tıklayınca buraya eklenir.</div>`;
-  const ekran = kutu.querySelector(".hm-ekran");
-  const sonuc = kutu.querySelector(".hm-sonuc");
-  const hesapla = () => {
-    const ifade = ekran.value.replace(/×/g, "*").replace(/÷/g, "/").replace(/−/g, "-").replace(/,/g, ".").replace(/\s/g, "");
-    if (!ifade) return;
-    if (!/^[\d+\-*/().]+$/.test(ifade)) { sonuc.textContent = "geçersiz ifade"; return; }
+function renderCalculator(box) {
+  if (!box) return;
+  box.innerHTML = `<input class="calc-screen" placeholder="0" spellcheck="false">
+    <div class="calc-result"></div>
+    <div class="calc-keys">${["C", "(", ")", "÷", "7", "8", "9", "×", "4", "5", "6", "−", "1", "2", "3", "+", "0", ".", "⌫", "="]
+      .map((t) => `<button class="${/[0-9.]/.test(t) ? "" : "op"} ${t === "=" ? "eq" : ""}">${t}</button>`).join("")}</div>
+    <div class="ps-note">Click a value in the statistics to add it here.</div>`;
+  const screen = box.querySelector(".calc-screen");
+  const result = box.querySelector(".calc-result");
+  const calculate = () => {
+    const expr = screen.value.replace(/×/g, "*").replace(/÷/g, "/").replace(/−/g, "-").replace(/,/g, "").replace(/\s/g, "");
+    if (!expr) return;
+    if (!/^[\d+\-*/().]+$/.test(expr)) { result.textContent = "invalid expression"; return; }
     try {
-      const v = Function(`"use strict";return (${ifade})`)();
+      const v = Function(`"use strict";return (${expr})`)();
       if (!Number.isFinite(v)) throw new Error();
-      sonuc.textContent = `${ekran.value} =`;
-      ekran.value = String(Math.round(v * 10000) / 10000).replace(".", ",");
-    } catch { sonuc.textContent = "geçersiz ifade"; }
+      result.textContent = `${screen.value} =`;
+      screen.value = String(Math.round(v * 10000) / 10000);
+    } catch { result.textContent = "invalid expression"; }
   };
-  kutu.querySelectorAll(".hm-tuslar button").forEach((b) => b.onclick = () => {
+  box.querySelectorAll(".calc-keys button").forEach((b) => b.onclick = () => {
     const t = b.textContent;
-    if (t === "C") { ekran.value = ""; sonuc.textContent = ""; }
-    else if (t === "⌫") ekran.value = ekran.value.slice(0, -1);
-    else if (t === "=") hesapla();
-    else ekran.value += t;
-    ekran.focus();
+    if (t === "C") { screen.value = ""; result.textContent = ""; }
+    else if (t === "⌫") screen.value = screen.value.slice(0, -1);
+    else if (t === "=") calculate();
+    else screen.value += t;
+    screen.focus();
   });
-  ekran.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); hesapla(); } });
+  screen.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); calculate(); } });
 }
 
-function hesapMakinesineEkle(deger) {
-  const ekran = document.querySelector(".hm-ekran");
-  if (!ekran) return;
-  const d = document.querySelector('details[data-b="hm"]');
+function addToCalculator(value) {
+  const screen = document.querySelector(".calc-screen");
+  if (!screen) return;
+  const d = document.querySelector('details[data-s="calc"]');
   if (d) d.open = true;
-  const sayi = String(deger).replace(".", ",");
-  ekran.value = /[\d,)]$/.test(ekran.value) ? `${ekran.value}+${sayi}` : ekran.value + sayi;
-  ekran.focus();
+  const n = String(value);
+  screen.value = /[\d.)]$/.test(screen.value) ? `${screen.value}+${n}` : screen.value + n;
+  screen.focus();
 }
 
-/* ---------------- ÇALIŞAN İSTATİSTİKLERİ ---------------- */
+/* ---------------- EMPLOYEE STATISTICS ---------------- */
 
-const IST = { bas: null, bit: null, sekme: "kisi" };
+const ST = { from: null, to: null, tab: "people" };
 
-async function istatistikCiz() {
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  const donemler = await api("/puantaj");
-  const yil = String(new Date().getFullYear());
-  if (IST.bas === null) {
-    const buYil = donemler.filter((d) => d.donem.startsWith(yil));
-    IST.bas = buYil[0]?.donem || ""; IST.bit = buYil.at(-1)?.donem || "";
+async function renderStatistics() {
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  const periods = await api("/timesheets");
+  const year = String(new Date().getFullYear());
+  if (ST.from === null) {
+    const thisYear = periods.filter((d) => d.period.startsWith(year));
+    ST.from = thisYear[0]?.period || ""; ST.to = thisYear.at(-1)?.period || "";
   }
-  const v = await api(`/istatistik?bas=${encodeURIComponent(IST.bas)}&bit=${encodeURIComponent(IST.bit)}`);
+  const v = await api(`/statistics?from=${encodeURIComponent(ST.from)}&to=${encodeURIComponent(ST.to)}`);
 
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas"><div><h2>Çalışan İstatistikleri</h2>
-    <p>Puantaj dönemlerinden toplanır; kişiler personel koduyla eşleştirilir. Proje görünümünde saatler ve tutarlar,
-      kişinin o gün çalıştığı ekibin projesine dağıtılır.</p></div></div>`));
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head"><div><h2>Employee Statistics</h2>
+    <p>Collected from the timesheet periods; people are matched by employee code. In the project view, hours and amounts
+      go to the project of the crew the person worked in on that day.</p></div></div>`));
 
-  const secenek = (secili, bos) => `<option value="">${bos}</option>` +
-    donemler.map((d) => `<option value="${d.donem}" ${d.donem === secili ? "selected" : ""}>${kacir(d.ad)}</option>`).join("");
-  const arac = el(`<div class="pt-filtre">
-    <label class="kucuk-et">Başlangıç <select data-i="bas">${secenek(IST.bas, "En baştan")}</select></label>
-    <label class="kucuk-et">Bitiş <select data-i="bit">${secenek(IST.bit, "Sona kadar")}</select></label>
-    <button class="dg ufak" data-h="yil">Bu yıl</button>
-    <button class="dg ufak" data-h="tumu">Tümü</button>
-    <div class="sekmeler">
-      <button class="sekme ${IST.sekme === "kisi" ? "aktif" : ""}" data-s="kisi">Çalışanlar · ${v.kisiler.length}</button>
-      <button class="sekme ${IST.sekme === "proje" ? "aktif" : ""}" data-s="proje">Projeler · ${v.projeler.length}</button>
+  const options = (selected, blank) => `<option value="">${blank}</option>` +
+    periods.map((d) => `<option value="${d.period}" ${d.period === selected ? "selected" : ""}>${esc(d.name)}</option>`).join("");
+  const tools = el(`<div class="ts-filter">
+    <label class="small-label">From <select data-i="from">${options(ST.from, "From the start")}</select></label>
+    <label class="small-label">To <select data-i="to">${options(ST.to, "To the end")}</select></label>
+    <button class="btn small" data-h="year">This year</button>
+    <button class="btn small" data-h="all">All</button>
+    <div class="tabs">
+      <button class="tab ${ST.tab === "people" ? "active" : ""}" data-s="people">Employees · ${v.people.length}</button>
+      <button class="tab ${ST.tab === "projects" ? "active" : ""}" data-s="projects">Projects · ${v.projects.length}</button>
     </div></div>`);
-  arac.querySelectorAll("[data-i]").forEach((s) => s.onchange = () => { IST[s.dataset.i] = s.value; istatistikCiz(); });
-  arac.querySelector('[data-h="yil"]').onclick = () => {
-    const b = donemler.filter((d) => d.donem.startsWith(yil));
-    IST.bas = b[0]?.donem || ""; IST.bit = b.at(-1)?.donem || ""; istatistikCiz();
+  tools.querySelectorAll("[data-i]").forEach((s) => s.onchange = () => { ST[s.dataset.i] = s.value; renderStatistics(); });
+  tools.querySelector('[data-h="year"]').onclick = () => {
+    const b = periods.filter((d) => d.period.startsWith(year));
+    ST.from = b[0]?.period || ""; ST.to = b.at(-1)?.period || ""; renderStatistics();
   };
-  arac.querySelector('[data-h="tumu"]').onclick = () => { IST.bas = ""; IST.bit = ""; istatistikCiz(); };
-  arac.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => { IST.sekme = b.dataset.s; istatistikCiz(); });
-  ana.appendChild(arac);
+  tools.querySelector('[data-h="all"]').onclick = () => { ST.from = ""; ST.to = ""; renderStatistics(); };
+  tools.querySelectorAll("[data-s]").forEach((b) => b.onclick = () => { ST.tab = b.dataset.s; renderStatistics(); });
+  main.appendChild(tools);
 
-  if (!v.donemler.length) {
-    ana.appendChild(el(`<div class="kart"><div class="bos"><div class="bs">Bu aralıkta puantaj dönemi yok</div>
-      <p><a href="#puantaj">Puantaj</a> ekranından bir dönem açıp saat girdikçe istatistikler burada oluşur.</p></div></div>`));
+  if (!v.periods.length) {
+    main.appendChild(el(`<div class="card"><div class="empty"><div class="big">No timesheet periods in this range</div>
+      <p>Open a period on the <a href="#timesheet">Timesheets</a> page and the statistics build up here as hours are entered.</p></div></div>`));
     return;
   }
 
-  const topla = (liste, alan) => liste.reduce((a, x) => {
-    if (typeof x[alan] === "number") return (a || 0) + x[alan];
-    const t = { ...(a || {}) }; for (const [pb, n] of Object.entries(x[alan] || {})) t[pb] = (t[pb] || 0) + n; return t;
+  const sum = (list, field) => list.reduce((a, x) => {
+    if (typeof x[field] === "number") return (a || 0) + x[field];
+    const t = { ...(a || {}) }; for (const [cur, n] of Object.entries(x[field] || {})) t[cur] = (t[cur] || 0) + n; return t;
   }, null);
-  const L = IST.sekme === "kisi" ? v.kisiler : v.projeler;
-  ana.appendChild(el(`<div>${metrikler([
-    [String(v.donemler.length), "Dönem", `${v.donemler[0].ad.split(" · ")[0]} → ${v.donemler.at(-1).ad.split(" · ")[0]}`],
-    [sayiMetni(topla(v.kisiler, "saat")), "Toplam saat"],
-    [sayiMetni(topla(v.kisiler, "mesai")), "Mesai saati"],
-    [sayiMetni(topla(v.kisiler, "eksik")), "Eksik saat"],
-    [toplamMetni(topla(v.kisiler, "hakedis")), "Hakediş"],
-    [toplamMetni(topla(v.kisiler, "yemek")), "Yemek"],
-    [toplamMetni(topla(v.kisiler, "kira")), "Kira payı"],
+  const L = ST.tab === "people" ? v.people : v.projects;
+  main.appendChild(el(`<div>${metrics([
+    [String(v.periods.length), "Periods", `${v.periods[0].name.split(" · ")[0]} → ${v.periods.at(-1).name.split(" · ")[0]}`],
+    [numText(sum(v.people, "hours")), "Total hours"],
+    [numText(sum(v.people, "overtime")), "Overtime hours"],
+    [numText(sum(v.people, "short")), "Short hours"],
+    [totalText(sum(v.people, "earnings")), "Earnings"],
+    [totalText(sum(v.people, "meals")), "Meals"],
+    [totalText(sum(v.people, "rent")), "Rent share"],
   ])}</div>`));
 
-  const sutunlar = IST.sekme === "kisi" ? [
-    ["Çalışan", (k) => `<a href="${k._id ? `#d/personel/${k._id}` : "#t/personel"}"><b>${kacir(k.ad)}</b></a><div class="soluk mono">${kacir(k.personelKod)}</div>`],
-    ["Dönem", (k) => k.donem, "donem"],
-    ["Saat", (k) => sayiMetni(k.saat), "saat"],
-    ["Normal", (k) => sayiMetni(k.normal), "normal"],
-    ["Mesai", (k) => sayiMetni(k.mesai), "mesai"],
-    ["Eksik", (k) => sayiMetni(k.eksik), "eksik"],
-    ["İzin/Rapor/Gelmedi", (k) => `${k.izin} / ${k.rapor} / ${k.gelmedi}`],
-    ["Hakediş", (k) => toplamMetni(k.hakedis), "hakedis"],
-    ["Kesinti", (k) => `<span title="${kacir(`Maaş: ${toplamMetni(k.kesintiMaas)}\nKira: ${toplamMetni(k.kesintiKira)}\nYemek: ${toplamMetni(k.kesintiYemek)}`)}">${toplamMetni(k.kesinti)}</span>`, "kesinti"],
-    ["Avans", (k) => toplamMetni(k.avans), "avans"],
-    ["Net", (k) => `<b>${toplamMetni(k.net)}</b>`, "net"],
-    ["Yemek", (k) => toplamMetni(k.yemek), "yemek"],
-    ["Kira", (k) => toplamMetni(k.kira), "kira"],
-    ["Projeler", (k) => kacir(k.projeler.map((p) => p.ad).join(", ") || "—")],
+  const columns = ST.tab === "people" ? [
+    ["Employee", (k) => `<a href="${k._id ? `#d/employees/${k._id}` : "#t/employees"}"><b>${esc(k.name)}</b></a><div class="muted mono">${esc(k.employeeCode)}</div>`],
+    ["Periods", (k) => k.periodCount, "periodCount"],
+    ["Hours", (k) => numText(k.hours), "hours"],
+    ["Normal", (k) => numText(k.normal), "normal"],
+    ["Overtime", (k) => numText(k.overtime), "overtime"],
+    ["Short", (k) => numText(k.short), "short"],
+    ["Leave/Sick/Absent", (k) => `${k.leave} / ${k.sick} / ${k.absent}`],
+    ["Earnings", (k) => totalText(k.earnings), "earnings"],
+    ["Deduction", (k) => `<span title="${esc(`Salary: ${totalText(k.deductionSalary)}\nRent: ${totalText(k.deductionRent)}\nMeals: ${totalText(k.deductionMeals)}`)}">${totalText(k.deduction)}</span>`, "deduction"],
+    ["Advance", (k) => totalText(k.advance), "advance"],
+    ["Net", (k) => `<b>${totalText(k.net)}</b>`, "net"],
+    ["Meals", (k) => totalText(k.meals), "meals"],
+    ["Rent", (k) => totalText(k.rent), "rent"],
+    ["Projects", (k) => esc(k.projects.map((p) => p.name).join(", ") || "—")],
   ] : [
-    ["Proje", (p) => `<b>${kacir(p.ad)}</b>`],
-    ["Kişi", (p) => p.kisi],
-    ["Saat", (p) => sayiMetni(p.saat), "saat"],
-    ["Normal", (p) => sayiMetni(p.normal), "normal"],
-    ["Mesai", (p) => sayiMetni(p.mesai), "mesai"],
-    ["Eksik", (p) => sayiMetni(p.eksik), "eksik"],
-    ["Maaş (hakediş)", (p) => toplamMetni(p.hakedis), "hakedis"],
-    ["Yemek", (p) => toplamMetni(p.yemek), "yemek"],
-    ["Kira", (p) => toplamMetni(p.kira), "kira"],
-    ["Toplam Maliyet", (p) => `<b>${toplamMetni(topla([{ t: p.hakedis }, { t: p.yemek }, { t: p.kira }], "t"))}</b>`],
+    ["Project", (p) => `<b>${esc(p.name)}</b>`],
+    ["People", (p) => p.people],
+    ["Hours", (p) => numText(p.hours), "hours"],
+    ["Normal", (p) => numText(p.normal), "normal"],
+    ["Overtime", (p) => numText(p.overtime), "overtime"],
+    ["Short", (p) => numText(p.short), "short"],
+    ["Salary (earnings)", (p) => totalText(p.earnings), "earnings"],
+    ["Meals", (p) => totalText(p.meals), "meals"],
+    ["Rent", (p) => totalText(p.rent), "rent"],
+    ["Total Cost", (p) => `<b>${totalText(sum([{ t: p.earnings }, { t: p.meals }, { t: p.rent }], "t"))}</b>`],
   ];
-  const tablo = el(`<div class="tablo-sar"><table class="mini ist-tablo"><thead><tr>${sutunlar.map(([b]) => `<th>${b}</th>`).join("")}</tr></thead>
-    <tbody>${L.map((x) => `<tr>${sutunlar.map(([, f]) => `<td>${f(x)}</td>`).join("")}</tr>`).join("")}</tbody>
-    <tfoot><tr>${sutunlar.map(([, , alan], i) => {
-      if (i === 0) return `<td><b>Toplam</b></td>`;
-      if (!alan) return `<td></td>`;
-      const t = topla(L, alan);
-      return `<td><b>${typeof t === "number" ? sayiMetni(t) : toplamMetni(t)}</b></td>`;
+  const table = el(`<div class="table-wrap"><table class="mini stat-table"><thead><tr>${columns.map(([b]) => `<th>${b}</th>`).join("")}</tr></thead>
+    <tbody>${L.map((x) => `<tr>${columns.map(([, f]) => `<td>${f(x)}</td>`).join("")}</tr>`).join("")}</tbody>
+    <tfoot><tr>${columns.map(([, , field], i) => {
+      if (i === 0) return `<td><b>Total</b></td>`;
+      if (!field) return `<td></td>`;
+      const t = sum(L, field);
+      return `<td><b>${typeof t === "number" ? numText(t) : totalText(t)}</b></td>`;
     }).join("")}</tr></tfoot></table></div>`);
-  ana.appendChild(tablo);
+  main.appendChild(table);
 }
 
-/* ---------------- KASA ---------------- */
+/* ---------------- CASH ---------------- */
 
-const KS = { ay: "", sekme: "hareket", rapor: { tur: "ay", yil: new Date().getFullYear(), proje: "", secili: null } };
-const PB_SIRA = ["EUR", "TRY", "RSD"];
-const RAPOR_TURLERI = [["donem", "15 gün"], ["ay", "Aylık"], ["ceyrek", "Çeyrek"], ["yariyil", "Yarıyıl"], ["yil", "Yıllık"], ["proje", "Proje"]];
+const CS = { month: "", tab: "moves", report: { type: "month", year: new Date().getFullYear(), project: "", selected: null } };
+const CUR_ORDER = ["EUR", "TRY", "RSD"];
+const REPORT_TYPES = [["period", "15 days"], ["month", "Monthly"], ["quarter", "Quarterly"], ["half", "Half-yearly"], ["year", "Yearly"], ["project", "Project"]];
 
-/** Toplamlarda geçen para birimleri, EUR / TRY / RSD sırasıyla. */
-function pbListesi(...toplamlar) {
-  const v = new Set(toplamlar.flatMap((t) => Object.keys(t || {}).filter((k) => t[k])));
-  return PB_SIRA.filter((k) => v.has(k)).concat([...v].filter((k) => !PB_SIRA.includes(k)));
+/** The currencies used in the totals, in EUR / TRY / RSD order. */
+function currencyList(...totals) {
+  const v = new Set(totals.flatMap((t) => Object.keys(t || {}).filter((k) => t[k])));
+  return CUR_ORDER.filter((k) => v.has(k)).concat([...v].filter((k) => !CUR_ORDER.includes(k)));
 }
 
-/** Bir hücrede para birimi başına bir satır. */
-const pbHucre = (t, sinif = "") => {
-  const pbler = pbListesi(t);
-  return pbler.length
-    ? pbler.map((pb) => `<div class="pb-sat ${sinif} ${t[pb] < 0 ? "eksi" : ""}"><span>${sayiMetni(t[pb])}</span><small>${pb}</small></div>`).join("")
-    : `<span class="soluk">—</span>`;
+/** One line per currency in a cell. */
+const curCell = (t, cls = "") => {
+  const curs = currencyList(t);
+  return curs.length
+    ? curs.map((cur) => `<div class="cur-row ${cls} ${t[cur] < 0 ? "neg" : ""}"><span>${numText(t[cur])}</span><small>${cur}</small></div>`).join("")
+    : `<span class="muted">—</span>`;
 };
 
-const kasaRaporMetni = (r) => [
-  r.eklenen ? `${r.eklenen} yeni satır` : "", r.guncellenen ? `${r.guncellenen} satır güncellendi` : "",
-  r.silinen ? `${r.silinen} satır kaldırıldı` : "",
-].filter(Boolean).join(", ") || "Değişiklik yok.";
+const cashSyncText = (r) => [
+  r.added ? `${r.added} new rows` : "", r.updated ? `${plural(r.updated, "row")} updated` : "",
+  r.deleted ? `${plural(r.deleted, "row")} removed` : "",
+].filter(Boolean).join(", ") || "No changes.";
 
-/** Devir / gelir / gider / bakiye kutusu: her para birimi bir satır. */
-function kasaOzetHtml(z, { devirEtiket = "Devir", bakiyeEtiket = "Bakiye", net = false } = {}) {
-  const pbler = pbListesi(z.devir, z.gelir, z.gider, z.bakiye);
-  if (!pbler.length) return `<div class="liste-bos">Bu aralıkta hareket ve devir yok.</div>`;
-  return `<table class="mini kasa-ozet"><thead><tr><th></th><th>${devirEtiket}</th><th>Gelir</th><th>Gider</th>${net ? "<th>Net</th>" : ""}<th>${bakiyeEtiket}</th></tr></thead>
-    <tbody>${pbler.map((pb) => `<tr><td class="pb">${pb}</td>
-      <td>${sayiMetni(z.devir[pb] || 0)}</td>
-      <td class="gelir">${z.gelir[pb] ? "+" + sayiMetni(z.gelir[pb]) : "—"}</td>
-      <td class="gider">${z.gider[pb] ? "−" + sayiMetni(z.gider[pb]) : "—"}</td>
-      ${net ? `<td class="${(z.net[pb] || 0) < 0 ? "eksi" : ""}">${sayiMetni(z.net[pb] || 0)}</td>` : ""}
-      <td class="bakiye ${(z.bakiye[pb] || 0) < 0 ? "eksi" : ""}"><b>${sayiMetni(z.bakiye[pb] || 0)}</b></td></tr>`).join("")}
-      ${anaSatirHtml([z.devir, z.gelir, z.gider, ...(net ? [z.net] : []), z.bakiye])}</tbody></table>`;
+/** Carry / income / expense / balance box: one row per currency. */
+function cashSummaryHtml(z, { carryLabel = "Carried over", balanceLabel = "Balance", net = false } = {}) {
+  const curs = currencyList(z.carry, z.income, z.expense, z.balance);
+  if (!curs.length) return `<div class="list-empty">No movements or carry-over in this range.</div>`;
+  return `<table class="mini cash-sum"><thead><tr><th></th><th>${carryLabel}</th><th>Income</th><th>Expense</th>${net ? "<th>Net</th>" : ""}<th>${balanceLabel}</th></tr></thead>
+    <tbody>${curs.map((cur) => `<tr><td class="cur">${cur}</td>
+      <td>${numText(z.carry[cur] || 0)}</td>
+      <td class="income">${z.income[cur] ? "+" + numText(z.income[cur]) : "—"}</td>
+      <td class="expense">${z.expense[cur] ? "−" + numText(z.expense[cur]) : "—"}</td>
+      ${net ? `<td class="${(z.net[cur] || 0) < 0 ? "neg" : ""}">${numText(z.net[cur] || 0)}</td>` : ""}
+      <td class="balance ${(z.balance[cur] || 0) < 0 ? "neg" : ""}"><b>${numText(z.balance[cur] || 0)}</b></td></tr>`).join("")}
+      ${baseRowHtml([z.carry, z.income, z.expense, ...(net ? [z.net] : []), z.balance])}</tbody></table>`;
 }
 
-async function kasaCiz(arg) {
-  if (arg === "rapor") KS.sekme = "rapor";
-  else { KS.sekme = "hareket"; KS.ay = arg || KS.ay || "bu"; }
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
+async function renderCash(arg) {
+  if (arg === "report") CS.tab = "report";
+  else { CS.tab = "moves"; CS.month = arg || CS.month || "current"; }
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
 
-  const bas = el(`<div class="sayfa-bas"><div><h2>Kasa</h2>
-    <p>Gelir ve giderler. Avans, yemek, kira ve maaş satırlarını sistem kendisi yazar. Kur çevirisi yapılmaz; her para birimi ayrı toplanır.</p></div>
-    <div class="bas-arac"></div></div>`);
-  const sekmeler = el(`<div class="sekmeler" style="margin-left:0">
-    <button class="sekme ${KS.sekme === "hareket" ? "aktif" : ""}" data-s="hareket">Hareketler</button>
-    <button class="sekme ${KS.sekme === "rapor" ? "aktif" : ""}" data-s="rapor">Raporlar</button></div>`);
-  sekmeler.querySelector('[data-s="hareket"]').onclick = () => { location.hash = `#kasa/${KS.ay && KS.ay !== "bu" ? KS.ay : ""}`.replace(/\/$/, ""); };
-  sekmeler.querySelector('[data-s="rapor"]').onclick = () => { location.hash = "#kasa/rapor"; };
+  const head = el(`<div class="page-head"><div><h2>Cash</h2>
+    <p>Income and expenses. The system writes the advance, meal, rent and salary rows itself. No currency conversion is done; each currency is totalled separately.</p></div>
+    <div class="head-tools"></div></div>`);
+  const tabs = el(`<div class="tabs" style="margin-left:0">
+    <button class="tab ${CS.tab === "moves" ? "active" : ""}" data-s="moves">Movements</button>
+    <button class="tab ${CS.tab === "report" ? "active" : ""}" data-s="report">Reports</button></div>`);
+  tabs.querySelector('[data-s="moves"]').onclick = () => { location.hash = `#cash/${CS.month && CS.month !== "current" ? CS.month : ""}`.replace(/\/$/, ""); };
+  tabs.querySelector('[data-s="report"]').onclick = () => { location.hash = "#cash/report"; };
 
-  if (KS.sekme === "rapor") return kasaRaporCiz(bas, sekmeler);
+  if (CS.tab === "report") return renderCashReport(head, tabs);
 
-  await kaynaklariYukle();
-  const v = await api(`/kasa/${KS.ay}`);
-  KS.ay = v.ay;
-  ana.innerHTML = "";
-  ana.appendChild(bas);
-  bas.querySelector(".bas-arac").innerHTML = `
-    <button class="dg" data-is="excel">Excel'e aktar</button>
-    <button class="dg" data-is="gelir">+ Gelir</button>
-    <button class="dg bas" data-is="gider">+ Gider</button>`;
+  await loadSources();
+  const v = await api(`/cash/${CS.month}`);
+  CS.month = v.month;
+  main.innerHTML = "";
+  main.appendChild(head);
+  head.querySelector(".head-tools").innerHTML = `
+    <button class="btn" data-do="excel">Export to Excel</button>
+    <button class="btn" data-do="income">+ Income</button>
+    <button class="btn primary" data-do="expense">+ Expense</button>`;
 
-  const arac = el(`<div class="pt-filtre kasa-arac">
-    <div class="ay-gez">
-      <a class="dg ufak" href="#kasa/${v.onceki}" title="Önceki ay">‹</a>
-      <b>${kacir(v.ad)}</b>
-      <a class="dg ufak" href="#kasa/${v.sonraki}" title="Sonraki ay">›</a>
-      ${v.ay !== v.buAy ? `<a class="dg ufak" href="#kasa/${v.buAy}">Bu ay</a>` : ""}
+  const tools = el(`<div class="ts-filter cash-tools">
+    <div class="month-nav">
+      <a class="btn small" href="#cash/${v.previous}" title="Previous month">‹</a>
+      <b>${esc(v.name)}</b>
+      <a class="btn small" href="#cash/${v.next}" title="Next month">›</a>
+      ${v.month !== v.current ? `<a class="btn small" href="#cash/${v.current}">This month</a>` : ""}
     </div></div>`);
-  arac.appendChild(sekmeler);
-  ana.appendChild(arac);
+  tools.appendChild(tabs);
+  main.appendChild(tools);
 
-  const ozetKart = kart(`${v.ad} · Özet`, `<span class="mono soluk">${v.satirlar.length} hareket</span>`);
-  ozetKart.classList.add("kasa-ozet-kart");
-  const ozetCiz = (z) => { ozetKart.querySelector(".kart-govde").innerHTML = kasaOzetHtml(z, { devirEtiket: "Devir (önceki aylar)", bakiyeEtiket: "Ay sonu bakiye" }); };
-  ozetCiz(v.ozet);
-  ana.appendChild(ozetKart);
+  const sumCard = card(`${v.name} · Summary`, `<span class="mono muted">${plural(v.rows.length, "movement")}</span>`);
+  sumCard.classList.add("cash-sum-card");
+  const drawSummary = (z) => { sumCard.querySelector(".card-body").innerHTML = cashSummaryHtml(z, { carryLabel: "Carried over (earlier months)", balanceLabel: "Month-end balance" }); };
+  drawSummary(v.summary);
+  main.appendChild(sumCard);
 
-  const notlar = [];
-  notlar.push(`Aylık dosya: <span class="mono">${kacir(v.dosya)}</span> — kasada her değişiklikte güncellenir.`);
-  if (v.dosyaHatasi) notlar.push(`<span class="kotu">${kacir(v.dosyaHatasi)}</span>`);
-  if (v.silinen.length) {
-    notlar.push(`Bu ay ${v.silinen.length} otomatik satır elle silindi; sistem bunları yazmıyor.
-      <button class="dg ufak" data-is="geri">Geri getir</button>`);
+  const notes = [];
+  notes.push(`Monthly file: <span class="mono">${esc(v.file)}</span> — updated on every change to the cash book.`);
+  if (v.fileError) notes.push(`<span class="bad">${esc(v.fileError)}</span>`);
+  if (v.deleted.length) {
+    notes.push(`${v.deleted.length} automatic rows were deleted by hand this month; the system does not write them.
+      <button class="btn small" data-do="restore">Bring back</button>`);
   }
-  const notKutu = el(`<div class="ipucu-kutu kasa-not">${notlar.map((n) => `<div>${n}</div>`).join("")}</div>`);
-  ana.appendChild(notKutu);
+  const noteBox = el(`<div class="hint-box cash-note">${notes.map((n) => `<div>${n}</div>`).join("")}</div>`);
+  main.appendChild(noteBox);
 
-  const ara = el(`<div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
-    <div class="ara-kutu"><input placeholder="Kasada ara (açıklama, kategori, proje…)" value="${kacir(tabloDurum.kasa?.filtre || "")}"></div>
-    <span id="satirSayi" style="font-family:var(--f-mono);font-size:11px;color:var(--muted)"></span>
-    <span class="kasa-lejant"><span class="pul-d otomatik">Otomatik</span> sistem yazdı
-      <span class="pul-d duzeltildi">Elle düzeltildi</span> sistem ezmez, tıklayınca geri döner</span>
+  const search = el(`<div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+    <div class="search"><input placeholder="Search the cash book (description, category, project…)" value="${esc(tableState.cash?.filter || "")}"></div>
+    <span id="rowCount" style="font-family:var(--f-mono);font-size:11px;color:var(--muted)"></span>
+    <span class="cash-legend"><span class="spill auto">Automatic</span> written by the system
+      <span class="spill edited">Corrected by hand</span> the system won't overwrite it; click to go back</span>
   </div>`);
-  ana.appendChild(ara);
-  const sar = el(`<div class="tablo-sar"><table class="gr kasa-gr"><thead></thead><tbody></tbody></table></div>`);
-  ana.appendChild(sar);
+  main.appendChild(search);
+  const wrap = el(`<div class="table-wrap"><table class="grid cash-grid"><thead></thead><tbody></tbody></table></div>`);
+  main.appendChild(wrap);
 
-  const ozetTazele = async () => {
-    try { const y = await api(`/kasa/${KS.ay}`); ozetCiz(y.ozet); } catch { /* yoksay */ }
+  const refreshSummary = async () => {
+    try { const y = await api(`/cash/${CS.month}`); drawSummary(y.summary); } catch { /* ignore */ }
   };
-  tabloDurum.kasa = { tanim: v.tanim, satirlar: v.satirlar, filtre: tabloDurum.kasa?.filtre || "", kaydedilince: ozetTazele };
-  ara.querySelector("input").oninput = (ev) => { tabloDurum.kasa.filtre = ev.target.value; gridCiz("kasa"); };
-  gridCiz("kasa");
+  tableState.cash = { def: v.def, rows: v.rows, filter: tableState.cash?.filter || "", onSaved: refreshSummary };
+  search.querySelector("input").oninput = (ev) => { tableState.cash.filter = ev.target.value; renderGrid("cash"); };
+  renderGrid("cash");
 
-  const yeni = (tur) => {
-    const bugun = bugunMetni();
-    tabloDurum.kasa.satirlar.unshift({
-      _id: null, _yeni: true, tur, paraBirimi: "EUR", tekrar: "Hayır",
-      tarih: bugun.startsWith(KS.ay) ? bugun : `${KS.ay}-01`,
-      kategori: tur === "Gelir" ? "Hakediş / Fatura" : "",
+  const add = (type) => {
+    const today = todayText();
+    tableState.cash.rows.unshift({
+      _id: null, _new: true, type, currency: "EUR", recurring: "No",
+      date: today.startsWith(CS.month) ? today : `${CS.month}-01`,
+      category: type === "Income" ? "Progress billing / Invoice" : "",
     });
-    gridCiz("kasa");
-    sar.querySelector('tbody tr.yeni input[data-k="aciklama"]')?.focus();
+    renderGrid("cash");
+    wrap.querySelector('tbody tr.new input[data-k="description"]')?.focus();
   };
-  bas.querySelector('[data-is="gelir"]').onclick = () => yeni("Gelir");
-  bas.querySelector('[data-is="gider"]').onclick = () => yeni("Gider");
-  bas.querySelector('[data-is="excel"]').onclick = () => { location.href = `/api/kasa/${KS.ay}/excel`; };
-  notKutu.querySelector('[data-is="geri"]')?.addEventListener("click", async () => {
+  head.querySelector('[data-do="income"]').onclick = () => add("Income");
+  head.querySelector('[data-do="expense"]').onclick = () => add("Expense");
+  head.querySelector('[data-do="excel"]').onclick = () => { location.href = `/api/cash/${CS.month}/excel`; };
+  noteBox.querySelector('[data-do="restore"]')?.addEventListener("click", async () => {
     try {
-      const r = await api(`/kasa/${KS.ay}/geri-getir`, { method: "POST" });
-      bildir("Otomatik satırlar geri getirildi", kasaRaporMetni(r), "iyi");
-      kasaCiz(KS.ay);
-    } catch (e) { hataBildir(e); }
+      const r = await api(`/cash/${CS.month}/restore`, { method: "POST" });
+      toast("Automatic rows brought back", cashSyncText(r), "good");
+      renderCash(CS.month);
+    } catch (e) { toastError(e); }
   });
 
-  // "Elle düzeltildi" etiketine tıklayınca satır sistemin hesabına döner.
-  sar.querySelector("tbody").addEventListener("click", async (ev) => {
-    const p = ev.target.closest("[data-geri]");
+  // Clicking the "Corrected by hand" label takes the row back to the system's figure.
+  wrap.querySelector("tbody").addEventListener("click", async (ev) => {
+    const p = ev.target.closest("[data-revert]");
     if (!p) return;
-    const satir = tabloDurum.kasa.satirlar.find((x) => x._id === p.dataset.geri);
-    const ok = await onay("Sistemin hesabına dönülsün mü?",
-      `Bu satırdaki elle düzeltme silinir ve sistemin hesabı yazılır: ${satir?.sistemTutar || "—"}.` +
-      (satir?.sistemTutar === "kaynağı silindi" ? " Kaynağı silindiği için satır kasadan kaldırılacak." : ""), "Sisteme bırak");
+    const row = tableState.cash.rows.find((x) => x._id === p.dataset.revert);
+    const ok = await confirmBox("Go back to the system's figure?",
+      `The correction made by hand on this row is removed and the system's figure is written: ${row?.systemAmount || "—"}.` +
+      (row?.systemAmount === "source deleted" ? " Its source was deleted, so the row will be removed from the cash book." : ""), "Hand back to the system");
     if (!ok) return;
     try {
-      await api(`/kasa/satir/${p.dataset.geri}/sistem`, { method: "POST" });
-      bildir("Satır sistemin hesabına döndü", "", "iyi");
-      kasaCiz(KS.ay);
-    } catch (e) { hataBildir(e); }
+      await api(`/cash/row/${p.dataset.revert}/system`, { method: "POST" });
+      toast("The row is back on the system's figure", "", "good");
+      renderCash(CS.month);
+    } catch (e) { toastError(e); }
   });
 }
 
-async function kasaRaporCiz(bas, sekmeler) {
-  const R = KS.rapor;
-  await kaynaklariYukle();
-  const q = new URLSearchParams({ tur: R.tur, yil: R.yil, proje: R.tur === "proje" ? "" : R.proje });
-  const r = await api(`/kasa/rapor?${q}`);
-  ana.innerHTML = "";
-  ana.appendChild(bas);
-  bas.querySelector(".bas-arac").innerHTML = `<button class="dg" data-is="excel">Raporu Excel'e aktar</button>`;
-  bas.querySelector('[data-is="excel"]').onclick = () => { location.href = `/api/kasa/rapor/excel?${q}`; };
+async function renderCashReport(head, tabs) {
+  const R = CS.report;
+  await loadSources();
+  const q = new URLSearchParams({ type: R.type, year: R.year, project: R.type === "project" ? "" : R.project });
+  const r = await api(`/cash/report?${q}`);
+  main.innerHTML = "";
+  main.appendChild(head);
+  head.querySelector(".head-tools").innerHTML = `<button class="btn" data-do="excel">Export the report to Excel</button>`;
+  head.querySelector('[data-do="excel"]').onclick = () => { location.href = `/api/cash/report/excel?${q}`; };
 
-  const projeler = kayitlar("proje");
-  const arac = el(`<div class="pt-filtre kasa-arac">
-    <div class="sekmeler rapor-tur" style="margin-left:0">${RAPOR_TURLERI.map(([k, b]) =>
-      `<button class="sekme ${R.tur === k ? "aktif" : ""}" data-t="${k}">${b}</button>`).join("")}</div>
-    ${R.tur === "yil" ? "" : `<label class="kucuk-et">Yıl <select data-r="yil">${r.yillar.map((y) =>
-      `<option ${y === r.yil ? "selected" : ""}>${y}</option>`).join("")}</select></label>`}
-    ${R.tur === "proje" ? "" : `<label class="kucuk-et">Proje <select data-r="proje">
-      <option value="">Tüm projeler</option><option value="-" ${R.proje === "-" ? "selected" : ""}>Projesiz</option>
-      ${projeler.map((p) => `<option value="${kacir(p.kod)}" ${R.proje === p.kod ? "selected" : ""}>${kacir(kayitEtiketi(p))}</option>`).join("")}
+  const projects = records("projects");
+  const tools = el(`<div class="ts-filter cash-tools">
+    <div class="tabs report-types" style="margin-left:0">${REPORT_TYPES.map(([k, b]) =>
+      `<button class="tab ${R.type === k ? "active" : ""}" data-t="${k}">${b}</button>`).join("")}</div>
+    ${R.type === "year" ? "" : `<label class="small-label">Year <select data-r="year">${r.years.map((y) =>
+      `<option ${y === r.year ? "selected" : ""}>${y}</option>`).join("")}</select></label>`}
+    ${R.type === "project" ? "" : `<label class="small-label">Project <select data-r="project">
+      <option value="">All projects</option><option value="-" ${R.project === "-" ? "selected" : ""}>No project</option>
+      ${projects.map((p) => `<option value="${esc(p.code)}" ${R.project === p.code ? "selected" : ""}>${esc(recordLabel(p))}</option>`).join("")}
     </select></label>`}
   </div>`);
-  arac.appendChild(sekmeler);
-  sekmeler.style.marginLeft = "auto";
-  ana.appendChild(arac);
-  arac.querySelectorAll("[data-t]").forEach((b) => b.onclick = () => { R.tur = b.dataset.t; R.secili = null; kasaCiz("rapor"); });
-  arac.querySelectorAll("[data-r]").forEach((s) => s.onchange = () => {
-    R[s.dataset.r] = s.dataset.r === "yil" ? Number(s.value) : s.value; R.secili = null; kasaCiz("rapor");
+  tools.appendChild(tabs);
+  tabs.style.marginLeft = "auto";
+  main.appendChild(tools);
+  tools.querySelectorAll("[data-t]").forEach((b) => b.onclick = () => { R.type = b.dataset.t; R.selected = null; renderCash("report"); });
+  tools.querySelectorAll("[data-r]").forEach((s) => s.onchange = () => {
+    R[s.dataset.r] = s.dataset.r === "year" ? Number(s.value) : s.value; R.selected = null; renderCash("report");
   });
 
-  const kapsam = R.tur === "yil" ? "Tüm yıllar" : String(r.yil);
-  const toplamKart = kart(`Toplam · ${kapsam} · ${r.projeAd}`);
-  toplamKart.querySelector(".kart-govde").innerHTML = kasaOzetHtml(r.toplam,
-    { devirEtiket: R.tur === "yil" ? "Devir" : "Yıl başı devir", bakiyeEtiket: R.tur === "yil" ? "Bakiye" : "Yıl sonu bakiye", net: true });
-  ana.appendChild(toplamKart);
+  const scope = R.type === "year" ? "All years" : String(r.year);
+  const totalCard = card(`Total · ${scope} · ${r.projectName}`);
+  totalCard.querySelector(".card-body").innerHTML = cashSummaryHtml(r.total,
+    { carryLabel: R.type === "year" ? "Carried over" : "Carried in at year start", balanceLabel: R.type === "year" ? "Balance" : "Year-end balance", net: true });
+  main.appendChild(totalCard);
 
-  const ilk = R.tur === "proje" ? "Proje" : "Dönem";
-  const tablo = el(`<div class="tablo-sar kasa-rapor-sar"><table class="mini ist-tablo kasa-rapor"><thead><tr>
-    <th>${ilk}</th><th>Devir</th><th>Gelir</th><th>Gider</th><th>Net</th><th>Bakiye</th><th>Hareket</th></tr></thead>
-    <tbody>${r.kovalar.map((k) => `<tr data-a="${kacir(k.anahtar)}" class="${k.adet ? "" : "bos-kova"} ${R.secili === k.anahtar ? "secili" : ""}">
-      <td><b>${kacir(k.ad)}</b>${R.tur === "ay" ? ` <a class="git" href="#kasa/${k.anahtar}" title="Bu ayın hareketleri">↗</a>` : ""}</td>
-      <td>${pbHucre(k.devir)}</td><td>${pbHucre(k.gelir, "gelir")}</td><td>${pbHucre(k.gider, "gider")}</td>
-      <td>${pbHucre(k.net)}</td><td>${pbHucre(k.bakiye, "bakiye")}</td><td class="soluk">${k.adet || "—"}</td></tr>`).join("")}
+  const first = R.type === "project" ? "Project" : "Period";
+  const table = el(`<div class="table-wrap cash-report-wrap"><table class="mini stat-table cash-report"><thead><tr>
+    <th>${first}</th><th>Carried over</th><th>Income</th><th>Expense</th><th>Net</th><th>Balance</th><th>Movements</th></tr></thead>
+    <tbody>${r.buckets.map((k) => `<tr data-a="${esc(k.key)}" class="${k.count ? "" : "empty-bucket"} ${R.selected === k.key ? "selected" : ""}">
+      <td><b>${esc(k.name)}</b>${R.type === "month" ? ` <a class="go" href="#cash/${k.key}" title="This month's movements">↗</a>` : ""}</td>
+      <td>${curCell(k.carry)}</td><td>${curCell(k.income, "income")}</td><td>${curCell(k.expense, "expense")}</td>
+      <td>${curCell(k.net)}</td><td>${curCell(k.balance, "balance")}</td><td class="muted">${k.count || "—"}</td></tr>`).join("")}
     </tbody></table></div>`);
-  ana.appendChild(tablo);
+  main.appendChild(table);
 
-  const dagilim = el(`<div class="kasa-dagilim"></div>`);
-  ana.appendChild(dagilim);
-  const dagilimCiz = () => {
-    const k = r.kovalar.find((x) => x.anahtar === R.secili);
-    const z = k || r.toplam;
-    const baslik = k ? k.ad : `${kapsam} toplamı`;
-    dagilim.innerHTML = "";
+  const split = el(`<div class="cash-split"></div>`);
+  main.appendChild(split);
+  const drawSplit = () => {
+    const k = r.buckets.find((x) => x.key === R.selected);
+    const z = k || r.total;
+    const title = k ? k.name : `${scope} total`;
+    split.innerHTML = "";
 
-    const kk = kart(`Kategori dağılımı · ${baslik}`, k ? `<button class="dg ufak" data-is="temizle">Toplama dön</button>` : `<span class="soluk mono">satıra tıklayınca o dönem</span>`);
-    const enBuyuk = {};
-    for (const c of z.kategoriler) for (const [pb, t] of Object.entries(c.tutar)) enBuyuk[`${c.tur}|${pb}`] = Math.max(enBuyuk[`${c.tur}|${pb}`] || 0, t);
-    kk.querySelector(".kart-govde").innerHTML = z.kategoriler.length ? z.kategoriler.map((c) => `
-      <div class="kat-sat"><span class="pul-d ${c.tur === "Gelir" ? "gelir" : "gider"}">${c.tur}</span><span class="ad">${kacir(c.kategori)}</span>
-        <div class="kat-tutar">${pbListesi(c.tutar).map((pb) => `<div class="kat-cubuk"><b class="iz">
-          <i style="width:${Math.max(2, Math.round(100 * c.tutar[pb] / enBuyuk[`${c.tur}|${pb}`]))}%" class="${c.tur === "Gelir" ? "gelir" : "gider"}"></i></b>
-          <span>${sayiMetni(c.tutar[pb])} <small>${pb}</small></span></div>`).join("")}</div></div>`).join("")
-      : `<div class="liste-bos">Bu aralıkta hareket yok.</div>`;
-    kk.querySelector('[data-is="temizle"]')?.addEventListener("click", () => { R.secili = null; tablo.querySelectorAll("tr.secili").forEach((t) => t.classList.remove("secili")); dagilimCiz(); });
-    dagilim.appendChild(kk);
+    const kk = card(`By category · ${title}`, k ? `<button class="btn small" data-do="clear">Back to the total</button>` : `<span class="muted mono">click a row for that period</span>`);
+    const largest = {};
+    for (const c of z.categories) for (const [cur, t] of Object.entries(c.amount)) largest[`${c.type}|${cur}`] = Math.max(largest[`${c.type}|${cur}`] || 0, t);
+    kk.querySelector(".card-body").innerHTML = z.categories.length ? z.categories.map((c) => `
+      <div class="cat-row"><span class="spill ${c.type === "Income" ? "income" : "expense"}">${c.type}</span><span class="name">${esc(c.category)}</span>
+        <div class="cat-amount">${currencyList(c.amount).map((cur) => `<div class="cat-bar"><b class="track">
+          <i style="width:${Math.max(2, Math.round(100 * c.amount[cur] / largest[`${c.type}|${cur}`]))}%" class="${c.type === "Income" ? "income" : "expense"}"></i></b>
+          <span>${numText(c.amount[cur])} <small>${cur}</small></span></div>`).join("")}</div></div>`).join("")
+      : `<div class="list-empty">No movements in this range.</div>`;
+    kk.querySelector('[data-do="clear"]')?.addEventListener("click", () => { R.selected = null; table.querySelectorAll("tr.selected").forEach((t) => t.classList.remove("selected")); drawSplit(); });
+    split.appendChild(kk);
 
-    if (R.tur !== "proje") {
-      const pk = kart(`Proje dağılımı · ${baslik}`);
-      pk.querySelector(".kart-govde").innerHTML = z.projeler.length ? `<table class="mini"><thead><tr><th>Proje</th><th>Gelir</th><th>Gider</th><th>Net</th></tr></thead>
-        <tbody>${z.projeler.map((p) => `<tr><td>${kacir(p.ad)}</td><td>${pbHucre(p.gelir, "gelir")}</td><td>${pbHucre(p.gider, "gider")}</td><td>${pbHucre(p.net)}</td></tr>`).join("")}</tbody></table>`
-        : `<div class="liste-bos">Bu aralıkta hareket yok.</div>`;
-      dagilim.appendChild(pk);
+    if (R.type !== "project") {
+      const pk = card(`By project · ${title}`);
+      pk.querySelector(".card-body").innerHTML = z.projects.length ? `<table class="mini"><thead><tr><th>Project</th><th>Income</th><th>Expense</th><th>Net</th></tr></thead>
+        <tbody>${z.projects.map((p) => `<tr><td>${esc(p.name)}</td><td>${curCell(p.income, "income")}</td><td>${curCell(p.expense, "expense")}</td><td>${curCell(p.net)}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="list-empty">No movements in this range.</div>`;
+      split.appendChild(pk);
     }
   };
-  tablo.querySelector("tbody").addEventListener("click", (ev) => {
+  table.querySelector("tbody").addEventListener("click", (ev) => {
     if (ev.target.closest("a")) return;
     const tr = ev.target.closest("tr[data-a]");
     if (!tr) return;
-    R.secili = R.secili === tr.dataset.a ? null : tr.dataset.a;
-    tablo.querySelectorAll("tr.secili").forEach((t) => t.classList.remove("secili"));
-    if (R.secili) tr.classList.add("secili");
-    dagilimCiz();
+    R.selected = R.selected === tr.dataset.a ? null : tr.dataset.a;
+    table.querySelectorAll("tr.selected").forEach((t) => t.classList.remove("selected"));
+    if (R.selected) tr.classList.add("selected");
+    drawSplit();
   });
-  dagilimCiz();
+  drawSplit();
 }
 
-/* ---------------- ÖNGÖRÜ ---------------- */
+/* ---------------- FORECAST ---------------- */
 
-const OG = { bas: "", adet: 24, proje: "", pb: "", secili: null, veri: null, odak: null, kaydirma: null };
+const FC = { from: "", count: 24, project: "", cur: "", selected: null, data: null, focus: null, scroll: null };
 
-/** Dönem kimliğini n dönem kaydırır (istemci tarafı; sunucudaki komsuDonem ile aynı). */
-function donemKaydir(donem, n) {
-  let [y, a, h] = donem.split("-").map(Number);
+/** Shifts a period id by n periods (client side; the same as adjacentPeriod on the server). */
+function shiftPeriod(period, n) {
+  let [y, a, h] = period.split("-").map(Number);
   let i = (y * 12 + (a - 1)) * 2 + (h - 1) + n;
   y = Math.floor(i / 24); i -= y * 24;
   return `${y}-${String(Math.floor(i / 2) + 1).padStart(2, "0")}-${(i % 2) + 1}`;
 }
 
-async function ongoruCiz() {
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  await kaynaklariYukle();
-  const q = new URLSearchParams({ bas: OG.bas, adet: OG.adet, proje: OG.proje });
-  const v = await api(`/ongoru?${q}`);
-  OG.veri = v; OG.bas = v.bas;
-  ongoruSayfaCiz();
+async function renderForecast() {
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  await loadSources();
+  const q = new URLSearchParams({ from: FC.from, count: FC.count, project: FC.project });
+  const v = await api(`/forecast?${q}`);
+  FC.data = v; FC.from = v.from;
+  renderForecastPage();
 }
 
-function ongoruSayfaCiz() {
-  const v = OG.veri;
-  if (!v.pbler.includes(OG.pb)) OG.pb = v.pbler[0];
-  const kaydirma = ana.querySelector(".og-sar")?.scrollLeft;
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas"><div><h2>Öngörü</h2>
-    <p>Geçmiş dönemler gerçekleşeni, gelecek dönemler tahmini gösterir. Tahmin hücresine tutar yazarak düzeltebilirsiniz;
-      hücreyi boşaltınca sistemin hesabına döner. Kur çevirisi yoktur, her para birimi ayrı sekmededir.</p></div>
-    <div class="bas-arac"><button class="dg" data-is="excel">Excel'e aktar</button></div></div>`));
+function renderForecastPage() {
+  const v = FC.data;
+  if (!v.currencies.includes(FC.cur)) FC.cur = v.currencies[0];
+  const scroll = main.querySelector(".fc-wrap")?.scrollLeft;
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head"><div><h2>Forecast</h2>
+    <p>Past periods show what actually happened, future periods show the estimate. Type an amount into an estimate cell to correct it;
+      empty the cell to go back to the system's figure. There is no currency conversion; each currency has its own tab.</p></div>
+    <div class="head-tools"><button class="btn" data-do="excel">Export to Excel</button></div></div>`));
 
-  const projeler = kayitlar("proje");
-  const arac = el(`<div class="pt-filtre og-arac">
-    <button class="dg ufak" data-k="-6" title="6 dönem geri">‹‹ 3 ay</button>
-    <button class="dg ufak" data-k="bugun">Bugün</button>
-    <button class="dg ufak" data-k="6" title="6 dönem ileri">3 ay ››</button>
-    <label class="kucuk-et">Proje <select data-i="proje">
-      <option value="">Tüm projeler</option><option value="-" ${OG.proje === "-" ? "selected" : ""}>Projesiz</option>
-      ${projeler.map((p) => `<option value="${kacir(p.kod)}" ${OG.proje === p.kod ? "selected" : ""}>${kacir(kayitEtiketi(p))}</option>`).join("")}
+  const projects = records("projects");
+  const tools = el(`<div class="ts-filter fc-tools">
+    <button class="btn small" data-k="-6" title="6 periods back">‹‹ 3 months</button>
+    <button class="btn small" data-k="today">Today</button>
+    <button class="btn small" data-k="6" title="6 periods forward">3 months ››</button>
+    <label class="small-label">Project <select data-i="project">
+      <option value="">All projects</option><option value="-" ${FC.project === "-" ? "selected" : ""}>No project</option>
+      ${projects.map((p) => `<option value="${esc(p.code)}" ${FC.project === p.code ? "selected" : ""}>${esc(recordLabel(p))}</option>`).join("")}
     </select></label>
-    <div class="sekmeler">${v.pbler.map((pb) => `<button class="sekme ${pb === OG.pb ? "aktif" : ""}" data-pb="${pb}">${pb}</button>`).join("")}</div>
+    <div class="tabs">${v.currencies.map((cur) => `<button class="tab ${cur === FC.cur ? "active" : ""}" data-cur="${cur}">${cur}</button>`).join("")}</div>
   </div>`);
-  ana.appendChild(arac);
-  arac.querySelectorAll("[data-k]").forEach((b) => b.onclick = () => {
-    OG.bas = b.dataset.k === "bugun" ? "" : donemKaydir(OG.bas, Number(b.dataset.k));
-    OG.secili = null; OG.kaydirma = b.dataset.k === "bugun" ? null : "koru"; ongoruCiz();
+  main.appendChild(tools);
+  tools.querySelectorAll("[data-k]").forEach((b) => b.onclick = () => {
+    FC.from = b.dataset.k === "today" ? "" : shiftPeriod(FC.from, Number(b.dataset.k));
+    FC.selected = null; FC.scroll = b.dataset.k === "today" ? null : "keep"; renderForecast();
   });
-  arac.querySelector('[data-i="proje"]').onchange = (ev) => { OG.proje = ev.target.value; OG.secili = null; OG.kaydirma = "koru"; ongoruCiz(); };
-  arac.querySelectorAll("[data-pb]").forEach((b) => b.onclick = () => { OG.pb = b.dataset.pb; OG.kaydirma = "koru"; ongoruSayfaCiz(); });
-  ana.querySelector('[data-is="excel"]').onclick = () => {
-    location.href = `/api/ongoru/excel?${new URLSearchParams({ bas: v.bas, adet: v.adet, proje: v.proje })}`;
+  tools.querySelector('[data-i="project"]').onchange = (ev) => { FC.project = ev.target.value; FC.selected = null; FC.scroll = "keep"; renderForecast(); };
+  tools.querySelectorAll("[data-cur]").forEach((b) => b.onclick = () => { FC.cur = b.dataset.cur; FC.scroll = "keep"; renderForecastPage(); });
+  main.querySelector('[data-do="excel"]').onclick = () => {
+    location.href = `/api/forecast/excel?${new URLSearchParams({ from: v.from, count: v.count, project: v.project })}`;
   };
 
-  // Önümüzdeki 6 tahmin döneminin özeti.
-  const pb = OG.pb;
-  const ileri = v.sutunlar.filter((s) => s.durum === "tahmin").slice(0, 6);
-  const topla = (t) => ileri.reduce((a, s) => a + (t[s.donem]?.[pb] || 0), 0);
-  const notlar = [];
-  if (!v.bilgi.kapaliDonem) notlar.push("Henüz kapanmış puantaj dönemi yok; mesai tahmini sıfır görünür.");
-  else if (v.bilgi.kapaliDonem < v.bilgi.mesaiOrnek) notlar.push(`Mesai tahmini ${v.bilgi.kapaliDonem} kapanmış dönemin ortalaması (en çok ${v.bilgi.mesaiOrnek} dönem kullanılır).`);
-  if (v.bilgi.maassiz) notlar.push(`${v.bilgi.maassiz} kişinin maaş bilgisi yok; maaş tahminine girmiyor.`);
-  ana.appendChild(el(`<div>${metrikler(ileri.length ? [
-    [`${sayiMetni(topla(v.toplam.gider))}`, `Gider tahmini · ${pb}`, `${ileri[0].ad.split(" · ")[0]} → ${ileri.at(-1).ad.split(" · ")[0]} (${ileri.length} dönem)`],
-    [`${sayiMetni(topla(v.toplam.gelir))}`, `Gelir tahmini · ${pb}`],
-    [`${sayiMetni(topla(v.toplam.net))}`, `Net · ${pb}`],
-    [`${sayiMetni(v.toplam.bakiye[ileri.at(-1).donem]?.[pb] || 0)}`, `Kasa bakiyesi · ${pb}`, `${ileri.at(-1).ad.split(" · ")[0]} sonunda`],
-  ] : [["—", "Tahmin dönemi yok", "Tabloyu ileri kaydırın"]])}</div>`));
-  if (notlar.length) ana.appendChild(el(`<div class="ipucu-kutu">${notlar.map(kacir).join("<br>")}</div>`));
+  // Summary of the next 6 estimate periods.
+  const cur = FC.cur;
+  const ahead = v.columns.filter((s) => s.state === "estimate").slice(0, 6);
+  const sumAhead = (t) => ahead.reduce((a, s) => a + (t[s.period]?.[cur] || 0), 0);
+  const notes = [];
+  if (!v.info.closedPeriods) notes.push("No timesheet period has been closed yet, so the overtime estimate shows zero.");
+  else if (v.info.closedPeriods < v.info.overtimeSamples) notes.push(`The overtime estimate is the average of ${v.info.closedPeriods} closed periods (at most ${plural(v.info.overtimeSamples, "period")} are used).`);
+  if (v.info.unpaid) notes.push(`${plural(v.info.unpaid, "person", "people")} have no pay information; they are not in the salary estimate.`);
+  main.appendChild(el(`<div>${metrics(ahead.length ? [
+    [`${numText(sumAhead(v.totals.expense))}`, `Expense estimate · ${cur}`, `${ahead[0].name.split(" · ")[0]} → ${ahead.at(-1).name.split(" · ")[0]} (${plural(ahead.length, "period")})`],
+    [`${numText(sumAhead(v.totals.income))}`, `Income estimate · ${cur}`],
+    [`${numText(sumAhead(v.totals.net))}`, `Net · ${cur}`],
+    [`${numText(v.totals.balance[ahead.at(-1).period]?.[cur] || 0)}`, `Cash balance · ${cur}`, `at the end of ${ahead.at(-1).name.split(" · ")[0]}`],
+  ] : [["—", "No estimate periods", "Scroll the table forward"]])}</div>`));
+  if (notes.length) main.appendChild(el(`<div class="hint-box">${notes.map(esc).join("<br>")}</div>`));
 
-  // Tablo
-  const aylar = [];
-  for (const s of v.sutunlar) { if (aylar.at(-1)?.ay === s.ay) aylar.at(-1).n += 1; else aylar.push({ ay: s.ay, n: 1 }); }
-  const sinif = (s) => `${s.durum === "gercek" ? "g" : "t"} ${s.bu ? "bu" : ""} ${s.yari === 1 ? "ay-bas" : ""}`;
-  const deger = (k, s) => v.degerler[k][s.donem]?.[pb];
-  const hucre = (row, s) => {
-    const d = deger(row.k, s);
-    const sec = OG.secili?.k === row.k && OG.secili?.donem === s.donem ? "secili" : "";
-    if (s.durum === "gercek") {
-      return `<td class="${sinif(s)} ${sec}" data-k="${row.k}" data-d="${s.donem}">${d?.deger ? sayiMetni(d.deger) : `<span class="soluk">—</span>`}</td>`;
+  // Table
+  const months = [];
+  for (const s of v.columns) { if (months.at(-1)?.month === s.month) months.at(-1).n += 1; else months.push({ month: s.month, n: 1 }); }
+  const cls = (s) => `${s.state === "actual" ? "actual" : "est"} ${s.current ? "current" : ""} ${s.half === 1 ? "month-start" : ""}`;
+  const value = (k, s) => v.values[k][s.period]?.[cur];
+  const cell = (row, s) => {
+    const d = value(row.key, s);
+    const sel = FC.selected?.k === row.key && FC.selected?.period === s.period ? "selected" : "";
+    if (s.state === "actual") {
+      return `<td class="${cls(s)} ${sel}" data-k="${row.key}" data-d="${s.period}">${d?.value ? numText(d.value) : `<span class="muted">—</span>`}</td>`;
     }
-    const ipucu = d?.elle ? `Elle düzeltildi. Sistemin hesabı: ${sayiMetni(d.sistem)} ${pb}` : "";
-    return `<td class="${sinif(s)} ${sec} ${d?.elle ? "elle" : ""}" data-k="${row.k}" data-d="${s.donem}" ${ipucu ? `title="${kacir(ipucu)}"` : ""}>
-      <input inputmode="decimal" data-ham="${d?.deger ?? ""}" value="${d?.deger ? sayiMetni(d.deger) : ""}" placeholder="—"></td>`;
+    const hint = d?.manual ? `Corrected by hand. The system's figure: ${numText(d.system)} ${cur}` : "";
+    return `<td class="${cls(s)} ${sel} ${d?.manual ? "manual" : ""}" data-k="${row.key}" data-d="${s.period}" ${hint ? `title="${esc(hint)}"` : ""}>
+      <input inputmode="decimal" data-raw="${d?.value ?? ""}" value="${d?.value ? numText(d.value) : ""}" placeholder="—"></td>`;
   };
-  const toplamSatiri = (ad, t, cls, k) => `<tr class="${cls}"><th>${ad}</th>${v.sutunlar.map((s) => {
-    const n = t[s.donem]?.[pb] || 0;
-    const sec = OG.secili?.k === k && OG.secili?.donem === s.donem ? "secili" : "";
-    return `<td class="${sinif(s)} ${sec} ${n < 0 ? "eksi" : ""}" data-k="${k}" data-d="${s.donem}">${n ? sayiMetni(n) : `<span class="soluk">—</span>`}</td>`;
+  const totalRow = (name, t, rowCls, k) => `<tr class="${rowCls}"><th>${name}</th>${v.columns.map((s) => {
+    const n = t[s.period]?.[cur] || 0;
+    const sel = FC.selected?.k === k && FC.selected?.period === s.period ? "selected" : "";
+    return `<td class="${cls(s)} ${sel} ${n < 0 ? "neg" : ""}" data-k="${k}" data-d="${s.period}">${n ? numText(n) : `<span class="muted">—</span>`}</td>`;
   }).join("")}</tr>`;
-  const giderler = v.satirlar.filter((r) => r.tur === "gider");
-  const tablo = el(`<div class="og-sar"><table class="og">
+  const expenses = v.rows.filter((r) => r.kind === "expense");
+  const table = el(`<div class="fc-wrap"><table class="fc">
     <thead>
-      <tr class="og-ay"><th rowspan="2" class="kose">${kacir(v.projeAd)}<small>${pb}</small></th>${aylar.map((a) => `<th colspan="${a.n}">${kacir(a.ay)}</th>`).join("")}</tr>
-      <tr class="og-yari">${v.sutunlar.map((s) => `<th class="${sinif(s)}">${s.aralik}<small>${s.bu ? "bu dönem" : s.durum === "gercek" ? "gerçekleşen" : "tahmin"}</small></th>`).join("")}</tr>
+      <tr class="fc-month"><th rowspan="2" class="corner">${esc(v.projectName)}<small>${cur}</small></th>${months.map((a) => `<th colspan="${a.n}">${esc(a.month)}</th>`).join("")}</tr>
+      <tr class="fc-half">${v.columns.map((s) => `<th class="${cls(s)}">${s.range}<small>${s.current ? "this period" : s.state === "actual" ? "actual" : "estimate"}</small></th>`).join("")}</tr>
     </thead>
     <tbody>
-      <tr class="grup"><th colspan="${v.sutunlar.length + 1}"><span>Giderler</span></th></tr>
-      ${giderler.map((r) => `<tr data-satir="${r.k}"><th>${kacir(r.ad)}</th>${v.sutunlar.map((s) => hucre(r, s)).join("")}</tr>`).join("")}
-      ${toplamSatiri("Toplam gider", v.toplam.gider, "toplam", "_gider")}
-      <tr class="grup"><th colspan="${v.sutunlar.length + 1}"><span>Gelirler</span></th></tr>
-      <tr data-satir="gelir"><th>Gelirler</th>${v.sutunlar.map((s) => hucre(v.satirlar.find((x) => x.k === "gelir"), s)).join("")}</tr>
-      ${toplamSatiri("Net (gelir − gider)", v.toplam.net, "toplam", "_net")}
-      ${toplamSatiri("Kasa bakiyesi", v.toplam.bakiye, "bakiye", "_bakiye")}
+      <tr class="group"><th colspan="${v.columns.length + 1}"><span>Expenses</span></th></tr>
+      ${expenses.map((r) => `<tr data-row="${r.key}"><th>${esc(r.name)}</th>${v.columns.map((s) => cell(r, s)).join("")}</tr>`).join("")}
+      ${totalRow("Total expenses", v.totals.expense, "total", "_expense")}
+      <tr class="group"><th colspan="${v.columns.length + 1}"><span>Income</span></th></tr>
+      <tr data-row="income"><th>Income</th>${v.columns.map((s) => cell(v.rows.find((x) => x.key === "income"), s)).join("")}</tr>
+      ${totalRow("Net (income − expenses)", v.totals.net, "total", "_net")}
+      ${totalRow("Cash balance", v.totals.balance, "balance", "_balance")}
     </tbody></table></div>`);
-  ana.appendChild(tablo);
+  main.appendChild(table);
 
-  const detay = el(`<div class="kart og-detay"></div>`);
-  ana.appendChild(detay);
-  ongoruDetayCiz(detay);
+  const detail = el(`<div class="card fc-detail"></div>`);
+  main.appendChild(detail);
+  renderForecastDetail(detail);
 
-  // Kaydırma: ilk açılışta bu dönem görünür; gezinmede eski yer korunur.
-  const sar = tablo;
-  if (OG.kaydirma === "koru" && kaydirma !== undefined) sar.scrollLeft = kaydirma;
+  // Scrolling: on first open the current period is in view; while navigating the old position is kept.
+  const wrap = table;
+  if (FC.scroll === "keep" && scroll !== undefined) wrap.scrollLeft = scroll;
   else {
-    const bu = sar.querySelector("th.bu");
-    if (bu) sar.scrollLeft = Math.max(0, bu.offsetLeft - sar.querySelector("th.kose").offsetWidth - 2 * bu.offsetWidth);
+    const now = wrap.querySelector("th.current");
+    if (now) wrap.scrollLeft = Math.max(0, now.offsetLeft - wrap.querySelector("th.corner").offsetWidth - 2 * now.offsetWidth);
   }
-  OG.kaydirma = null;
+  FC.scroll = null;
 
-  const sec = (k, donem) => {
-    OG.secili = { k, donem };
-    sar.querySelectorAll("td.secili").forEach((t) => t.classList.remove("secili"));
-    sar.querySelector(`td[data-k="${k}"][data-d="${donem}"]`)?.classList.add("secili");
-    ongoruDetayCiz(detay);
+  const select = (k, period) => {
+    FC.selected = { k, period };
+    wrap.querySelectorAll("td.selected").forEach((t) => t.classList.remove("selected"));
+    wrap.querySelector(`td[data-k="${k}"][data-d="${period}"]`)?.classList.add("selected");
+    renderForecastDetail(detail);
   };
-  sar.addEventListener("click", (ev) => { const td = ev.target.closest("td[data-k]"); if (td) sec(td.dataset.k, td.dataset.d); });
+  wrap.addEventListener("click", (ev) => { const td = ev.target.closest("td[data-k]"); if (td) select(td.dataset.k, td.dataset.d); });
 
-  const girdiler = [...sar.querySelectorAll("td input")];
-  for (const inp of girdiler) {
+  const inputs = [...wrap.querySelectorAll("td input")];
+  for (const inp of inputs) {
     const td = inp.closest("td");
-    inp.addEventListener("focus", () => { inp.value = inp.dataset.ham ? String(inp.dataset.ham).replace(".", ",") : ""; inp.select(); sec(td.dataset.k, td.dataset.d); });
+    inp.addEventListener("focus", () => { inp.value = inp.dataset.raw || ""; inp.select(); select(td.dataset.k, td.dataset.d); });
     inp.addEventListener("blur", () => {
-      if (inp.dataset.degisti) return;
-      inp.value = inp.dataset.ham ? sayiMetni(inp.dataset.ham) : "";
+      if (inp.dataset.changed) return;
+      inp.value = inp.dataset.raw ? numText(inp.dataset.raw) : "";
     });
-    inp.addEventListener("input", () => { inp.dataset.degisti = "1"; });
+    inp.addEventListener("input", () => { inp.dataset.changed = "1"; });
     inp.addEventListener("keydown", (ev) => {
-      const satirlar = [...sar.querySelectorAll("tr[data-satir]")];
-      const r = satirlar.indexOf(inp.closest("tr"));
-      const hedef = (dr, dd) => {
-        const tr = satirlar[r + dr];
-        const donem = dd ? donemKaydir(td.dataset.d, dd) : td.dataset.d;
-        return tr?.querySelector(`td[data-d="${donem}"] input`);
+      const rows = [...wrap.querySelectorAll("tr[data-row]")];
+      const r = rows.indexOf(inp.closest("tr"));
+      const target = (dr, dd) => {
+        const tr = rows[r + dr];
+        const period = dd ? shiftPeriod(td.dataset.d, dd) : td.dataset.d;
+        return tr?.querySelector(`td[data-d="${period}"] input`);
       };
       let h = null;
-      if (ev.key === "Enter" || ev.key === "ArrowDown") h = hedef(1, 0);
-      else if (ev.key === "ArrowUp") h = hedef(-1, 0);
-      else if (ev.key === "ArrowRight" && inp.selectionStart === inp.value.length) h = hedef(0, 1);
-      else if (ev.key === "ArrowLeft" && inp.selectionStart === 0) h = hedef(0, -1);
-      else if (ev.key === "Escape") { delete inp.dataset.degisti; inp.blur(); return; }
+      if (ev.key === "Enter" || ev.key === "ArrowDown") h = target(1, 0);
+      else if (ev.key === "ArrowUp") h = target(-1, 0);
+      else if (ev.key === "ArrowRight" && inp.selectionStart === inp.value.length) h = target(0, 1);
+      else if (ev.key === "ArrowLeft" && inp.selectionStart === 0) h = target(0, -1);
+      else if (ev.key === "Escape") { delete inp.dataset.changed; inp.blur(); return; }
       else return;
       ev.preventDefault();
       if (h) h.focus(); else inp.blur();
     });
-    inp.addEventListener("change", () => ongoruHucreKaydet(inp, td));
+    inp.addEventListener("change", () => saveForecastCell(inp, td));
   }
 }
 
-/** "1.500", "1.500,25", "1500,25" ve "1500.25" aynı sayıya çevrilir. */
-function trSayi(s) {
-  let x = String(s || "").trim().replace(/\s/g, "");
-  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(x)) x = x.replace(/\./g, "");
-  return x.replace(",", ".");
-}
-
-async function ongoruHucreKaydet(inp, td) {
-  const v = OG.veri;
+async function saveForecastCell(inp, td) {
+  const v = FC.data;
   try {
-    OG.veri = await api("/ongoru/hucre", {
+    // The server accepts "1,500.25", "1500.25" and "1500,25".
+    FC.data = await api("/forecast/cell", {
       method: "PUT",
-      body: JSON.stringify({ donem: td.dataset.d, satir: td.dataset.k, pb: OG.pb, proje: v.proje, deger: trSayi(inp.value), gorunum: { bas: v.bas, adet: v.adet, proje: v.proje } }),
+      body: JSON.stringify({ period: td.dataset.d, row: td.dataset.k, currency: FC.cur, project: v.project, value: inp.value.trim(), view: { from: v.from, count: v.count, project: v.project } }),
     });
-    // Kayıt sürerken odak başka hücreye geçmiş olabilir; yeniden çizimden sonra oraya dönülür.
-    const sonraki = document.activeElement?.closest?.("td[data-k]");
-    OG.odak = sonraki && sonraki !== td ? { k: sonraki.dataset.k, d: sonraki.dataset.d } : null;
-    OG.kaydirma = "koru";
-    ongoruSayfaCiz();
-    if (OG.odak) ana.querySelector(`td[data-k="${OG.odak.k}"][data-d="${OG.odak.d}"] input`)?.focus();
+    // Focus may have moved to another cell while saving; it goes back there after the redraw.
+    const next = document.activeElement?.closest?.("td[data-k]");
+    FC.focus = next && next !== td ? { k: next.dataset.k, d: next.dataset.d } : null;
+    FC.scroll = "keep";
+    renderForecastPage();
+    if (FC.focus) main.querySelector(`td[data-k="${FC.focus.k}"][data-d="${FC.focus.d}"] input`)?.focus();
   } catch (e) {
-    hataBildir(e);
-    delete inp.dataset.degisti;
-    inp.value = inp.dataset.ham ? sayiMetni(inp.dataset.ham) : "";
+    toastError(e);
+    delete inp.dataset.changed;
+    inp.value = inp.dataset.raw ? numText(inp.dataset.raw) : "";
   }
 }
 
-function ongoruDetayCiz(kutu) {
-  const v = OG.veri, pb = OG.pb, s = OG.secili;
-  const sut = s && v.sutunlar.find((x) => x.donem === s.donem);
-  if (!sut) {
-    kutu.innerHTML = `<div class="kart-bas"><h3>Hücre ayrıntısı</h3></div>
-      <div class="kart-govde og-kaynaklar">${v.satirlar.map((r) => `<div><b>${kacir(r.ad)}</b>
-        <span><i>gerçekleşen:</i> ${kacir(r.gercek)}</span><span><i>tahmin:</i> ${kacir(r.tahmin)}</span></div>`).join("")}
-        <div><b>Kasa bakiyesi</b><span><i>gerçekleşen:</i> kasadaki dönem sonu bakiyesi</span><span><i>tahmin:</i> önceki dönemin bakiyesi + tahmini net</span></div>
-        <p class="soluk">Bir hücreye tıklayınca hangi kişi, ekip, ev ya da kasa satırından geldiği burada listelenir.</p></div>`;
+function renderForecastDetail(box) {
+  const v = FC.data, cur = FC.cur, s = FC.selected;
+  const col = s && v.columns.find((x) => x.period === s.period);
+  if (!col) {
+    box.innerHTML = `<div class="card-head"><h3>Cell detail</h3></div>
+      <div class="card-body fc-sources">${v.rows.map((r) => `<div><b>${esc(r.name)}</b>
+        <span><i>actual:</i> ${esc(r.actual)}</span><span><i>estimate:</i> ${esc(r.estimate)}</span></div>`).join("")}
+        <div><b>Cash balance</b><span><i>actual:</i> the period-end balance in the cash book</span><span><i>estimate:</i> the previous balance + the estimated net</span></div>
+        <p class="muted">Click a cell to see which person, crew, house or cash row it comes from.</p></div>`;
     return;
   }
-  const tanim = v.satirlar.find((r) => r.k === s.k);
-  const ad = tanim?.ad || { _gider: "Toplam gider", _net: "Net", _bakiye: "Kasa bakiyesi" }[s.k];
-  const d = v.degerler[s.k]?.[s.donem]?.[pb];
-  const kaynak = tanim ? (sut.durum === "gercek" ? tanim.gercek : tanim.tahmin) : "";
-  let govde;
-  if (!tanim) {
-    const t = { _gider: v.toplam.gider, _net: v.toplam.net, _bakiye: v.toplam.bakiye }[s.k][s.donem]?.[pb] || 0;
-    const parca = s.k === "_gider" ? v.satirlar.filter((r) => r.tur === "gider").map((r) => [r.ad, v.degerler[r.k][s.donem]?.[pb]?.deger || 0])
-      : s.k === "_net" ? [["Gelir", v.toplam.gelir[s.donem]?.[pb] || 0], ["Gider", -(v.toplam.gider[s.donem]?.[pb] || 0)]]
-        : [[sut.durum === "gercek" ? "Kasadaki dönem sonu bakiyesi" : "Önceki bakiye + tahmini net", t]];
-    govde = `<table class="mini">${parca.map(([a, n]) => `<tr><td>${kacir(a)}</td><td class="sag-hiza">${sayiMetni(n)} ${pb}</td></tr>`).join("")}
-      <tr class="toplam"><td><b>Toplam</b></td><td class="sag-hiza"><b>${sayiMetni(t)} ${pb}</b></td></tr></table>`;
+  const def = v.rows.find((r) => r.key === s.k);
+  const name = def?.name || { _expense: "Total expenses", _net: "Net", _balance: "Cash balance" }[s.k];
+  const d = v.values[s.k]?.[s.period]?.[cur];
+  const source = def ? (col.state === "actual" ? def.actual : def.estimate) : "";
+  let body;
+  if (!def) {
+    const t = { _expense: v.totals.expense, _net: v.totals.net, _balance: v.totals.balance }[s.k][s.period]?.[cur] || 0;
+    const parts = s.k === "_expense" ? v.rows.filter((r) => r.kind === "expense").map((r) => [r.name, v.values[r.key][s.period]?.[cur]?.value || 0])
+      : s.k === "_net" ? [["Income", v.totals.income[s.period]?.[cur] || 0], ["Expenses", -(v.totals.expense[s.period]?.[cur] || 0)]]
+        : [[col.state === "actual" ? "Period-end balance in the cash book" : "Previous balance + estimated net", t]];
+    body = `<table class="mini">${parts.map(([a, n]) => `<tr><td>${esc(a)}</td><td class="ta-right">${numText(n)} ${cur}</td></tr>`).join("")}
+      <tr class="total"><td><b>Total</b></td><td class="ta-right"><b>${numText(t)} ${cur}</b></td></tr></table>`;
   } else {
-    const liste = d?.detay || [];
-    govde = `${d?.elle ? `<div class="og-elle">Elle düzeltildi: <b>${sayiMetni(d.deger)} ${pb}</b>. Sistemin hesabı: <b>${sayiMetni(d.sistem)} ${pb}</b>
-        <button class="dg ufak" data-is="sistem">Sistemin hesabına dön</button></div>` : ""}
-      ${liste.length ? `<table class="mini">${liste.slice(0, 40).map((x) => `<tr><td>${kacir(x.ad)}</td><td class="sag-hiza">${sayiMetni(x.tutar)} ${pb}</td></tr>`).join("")}
-        ${liste.length > 40 ? `<tr><td class="soluk">… ${liste.length - 40} kalem daha</td><td></td></tr>` : ""}
-        <tr class="toplam"><td><b>Sistemin hesabı</b></td><td class="sag-hiza"><b>${sayiMetni(d.sistem)} ${pb}</b></td></tr></table>`
-        : `<div class="liste-bos">Bu hücreye ${pb} cinsinden veri gelmiyor.</div>`}`;
+    const list = d?.detail || [];
+    body = `${d?.manual ? `<div class="fc-manual">Corrected by hand: <b>${numText(d.value)} ${cur}</b>. The system's figure: <b>${numText(d.system)} ${cur}</b>
+        <button class="btn small" data-do="system">Back to the system's figure</button></div>` : ""}
+      ${list.length ? `<table class="mini">${list.slice(0, 40).map((x) => `<tr><td>${esc(x.name)}</td><td class="ta-right">${numText(x.amount)} ${cur}</td></tr>`).join("")}
+        ${list.length > 40 ? `<tr><td class="muted">… ${list.length - 40} more items</td><td></td></tr>` : ""}
+        <tr class="total"><td><b>The system's figure</b></td><td class="ta-right"><b>${numText(d.system)} ${cur}</b></td></tr></table>`
+        : `<div class="list-empty">No ${cur} data feeds into this cell.</div>`}`;
   }
-  kutu.innerHTML = `<div class="kart-bas"><h3>${kacir(ad)} · ${kacir(sut.ad)}</h3>
-    <div class="sag"><span class="pul-d ${sut.durum === "gercek" ? "elle" : "otomatik"}">${sut.durum === "gercek" ? "gerçekleşen" : "tahmin"}</span>
-    <button class="dg ufak" data-is="kapat">Kapat</button></div></div>
-    <div class="kart-govde">${kaynak ? `<p class="soluk og-kaynak">${kacir(kaynak)}</p>` : ""}${govde}</div>`;
-  kutu.querySelector('[data-is="kapat"]').onclick = () => {
-    OG.secili = null; ana.querySelectorAll(".og td.secili").forEach((t) => t.classList.remove("secili")); ongoruDetayCiz(kutu);
+  box.innerHTML = `<div class="card-head"><h3>${esc(name)} · ${esc(col.name)}</h3>
+    <div class="right"><span class="spill ${col.state === "actual" ? "manual" : "auto"}">${col.state === "actual" ? "actual" : "estimate"}</span>
+    <button class="btn small" data-do="close">Close</button></div></div>
+    <div class="card-body">${source ? `<p class="muted fc-source">${esc(source)}</p>` : ""}${body}</div>`;
+  box.querySelector('[data-do="close"]').onclick = () => {
+    FC.selected = null; main.querySelectorAll(".fc td.selected").forEach((t) => t.classList.remove("selected")); renderForecastDetail(box);
   };
-  kutu.querySelector('[data-is="sistem"]')?.addEventListener("click", async () => {
+  box.querySelector('[data-do="system"]')?.addEventListener("click", async () => {
     try {
-      OG.veri = await api("/ongoru/hucre", {
+      FC.data = await api("/forecast/cell", {
         method: "PUT",
-        body: JSON.stringify({ donem: s.donem, satir: s.k, pb, proje: v.proje, deger: "", gorunum: { bas: v.bas, adet: v.adet, proje: v.proje } }),
+        body: JSON.stringify({ period: s.period, row: s.k, currency: cur, project: v.project, value: "", view: { from: v.from, count: v.count, project: v.project } }),
       });
-      bildir("Sistemin hesabına dönüldü", "", "iyi");
-      OG.kaydirma = "koru"; ongoruSayfaCiz();
-    } catch (e) { hataBildir(e); }
+      toast("Back on the system's figure", "", "good");
+      FC.scroll = "keep"; renderForecastPage();
+    } catch (e) { toastError(e); }
   });
 }
 
-/* ---------------- ÖDEMELER ---------------- */
+/* ---------------- PAYMENTS ---------------- */
 
-const OD = { ay: "", tarih: {} };
-const GUN_ADLARI = ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"];
-const tarihUzun = (g) => {
+const PY = { month: "", date: {} };
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const longDate = (g) => {
   const d = new Date(`${g}T00:00:00`);
-  return `${d.getDate()} ${["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"][d.getMonth()]} ${d.getFullYear()} · ${GUN_ADLARI[d.getDay()]}`;
+  return `${d.getDate()} ${["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][d.getMonth()]} ${d.getFullYear()} · ${DAY_NAMES[d.getDay()]}`;
 };
-const tarihKisa = (g) => (g ? g.split("-").reverse().join(".") : "");
+const shortDate = (g) => (g ? g.split("-").reverse().join("/") : "");
 
-/** Ödeme kaleminin altındaki kısa açıklama: hesabın nereden geldiği. */
-function odemeDetayMetni(k) {
-  const d = k.detay || {};
-  if (k.tur === "yemek") return `${d.gun} gün × ${sayiMetni(d.gunluk)} ${k.paraBirimi} (önden)`;
-  if (k.tur === "kira") return `${d.kisi ? `${d.kisi} kişi kalıyor` : "ev boş"} · kira ${sayiMetni(d.kira)} ${k.paraBirimi} (${(d.periyot || "Aylık").toLocaleLowerCase("tr")})`;
-  if (k.tur === "saatlik" || k.tur === "aylik") {
-    const kd = d.kesintiDetay || {};
-    const p = [`hakediş ${sayiMetni(d.hakedis)}`];
-    if (d.mesaiTutar) p.push(`mesai ${sayiMetni(d.mesai)} sa = ${sayiMetni(d.mesaiTutar)}`);
-    if (d.kesinti) p.push(`kesinti −${sayiMetni(d.kesinti)}${d.gelmedi ? ` (${d.gelmedi} gün gelmedi: maaş ${sayiMetni(kd.maas + kd.eksikSaat)}, kira ${sayiMetni(kd.kira)}, yemek ${sayiMetni(kd.yemek)})` : ""}`);
-    if (d.avans) p.push(`avans −${sayiMetni(d.avans)}`);
-    if (k.tur === "aylik" && d.ilkYari !== null && d.ilkYari !== undefined) p.push(`1. yarı neti ${sayiMetni(d.ilkYari)} dahil`);
+/** The short line under a payment item: where the figure comes from. */
+function paymentDetailText(k) {
+  const d = k.detail || {};
+  if (k.type === "meals") return `${plural(d.days, "day")} × ${numText(d.daily)} ${k.currency} (in advance)`;
+  if (k.type === "rent") return `${d.people ? `${plural(d.people, "person", "people")} live there` : "house empty"} · rent ${numText(d.rent)} ${k.currency} (${(d.period || "Monthly").toLowerCase()})`;
+  if (k.type === "hourly" || k.type === "monthly") {
+    const dd = d.deductionDetail || {};
+    const p = [`earnings ${numText(d.earnings)}`];
+    if (d.overtimePay) p.push(`overtime ${numText(d.overtime)} h = ${numText(d.overtimePay)}`);
+    if (d.deduction) p.push(`deduction −${numText(d.deduction)}${d.absent ? ` (${plural(d.absent, "day")} absent: salary ${numText(dd.salary + dd.shortHours)}, rent ${numText(dd.rent)}, meals ${numText(dd.meals)})` : ""}`);
+    if (d.advance) p.push(`advance −${numText(d.advance)}`);
+    if (k.type === "monthly" && d.firstHalf !== null && d.firstHalf !== undefined) p.push(`includes the 1st-half net ${numText(d.firstHalf)}`);
     return p.join(" · ");
   }
   return "";
 }
 
-async function odemelerCiz(ay) {
-  OD.ay = ay || OD.ay || "bu";
-  ana.innerHTML = `<div class="bos"><span class="yukleniyor"></span></div>`;
-  await kaynaklariYukle();
-  const v = await api(`/odeme/${OD.ay}`);
-  OD.ay = v.ay;
-  const bugun = bugunMetni();
-  const personelId = new Map(kayitlar("personel").map((p) => [p.kod, p._id]));
-  const evId = new Map(kayitlar("ev").map((e) => [e.kod, e._id]));
+async function renderPayments(month) {
+  PY.month = month || PY.month || "current";
+  main.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+  await loadSources();
+  const v = await api(`/payments/${PY.month}`);
+  PY.month = v.month;
+  const today = todayText();
+  const employeeId = new Map(records("employees").map((p) => [p.code, p._id]));
+  const houseId = new Map(records("houses").map((e) => [e.code, e._id]));
 
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas"><div><h2>Ödemeler</h2>
-    <p>Kime, ne zaman, ne kadar ödenecek. Ayın 1'inde kiralar ve aylık maaşlar, her 15 günde saatlik ücretler ve önden yemek paraları.
-      "Ödendi" işaretlenen kalem, ödeme tarihiyle kasaya gider olarak düşer. Ödenen tutar hesaplanandan farklı olabilir.</p></div></div>`));
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head"><div><h2>Payments</h2>
+    <p>Who gets paid, when and how much. Rents and monthly salaries on the 1st of the month, hourly wages and meal allowances (in advance) every 15 days.
+      An item marked "paid" goes into the cash book as an expense on the payment date. The amount paid may differ from the calculated one.</p></div></div>`));
 
-  const arac = el(`<div class="pt-filtre kasa-arac"><div class="ay-gez">
-    <a class="dg ufak" href="#odemeler/${v.onceki}" title="Önceki ay">‹</a><b>${kacir(v.ad)}</b>
-    <a class="dg ufak" href="#odemeler/${v.sonraki}" title="Sonraki ay">›</a>
-    ${v.ay !== v.buAy ? `<a class="dg ufak" href="#odemeler/${v.buAy}">Bu ay</a>` : ""}</div></div>`);
-  ana.appendChild(arac);
+  const tools = el(`<div class="ts-filter cash-tools"><div class="month-nav">
+    <a class="btn small" href="#payments/${v.previous}" title="Previous month">‹</a><b>${esc(v.name)}</b>
+    <a class="btn small" href="#payments/${v.next}" title="Next month">›</a>
+    ${v.month !== v.current ? `<a class="btn small" href="#payments/${v.current}">This month</a>` : ""}</div></div>`);
+  main.appendChild(tools);
 
-  if (v.gecikmis.adet) {
-    ana.appendChild(el(`<div class="od-uyari">Önceki aylarda ödenmemiş <b>${v.gecikmis.adet} kalem</b> var.
-      <a class="dg ufak" href="#odemeler/${v.gecikmis.enEski.slice(0, 7)}">En eskisine git (${tarihKisa(v.gecikmis.enEski)})</a></div>`));
+  if (v.overdue.count) {
+    main.appendChild(el(`<div class="pay-warn">There are <b>${v.overdue.count} unpaid items</b> from earlier months.
+      <a class="btn small" href="#payments/${v.overdue.oldest.slice(0, 7)}">Go to the oldest (${shortDate(v.overdue.oldest)})</a></div>`));
   }
 
-  const pbler = pbListesi(v.ozet.toplam, v.ozet.odenen);
-  const ozetK = kart(`${v.ad} · Özet`, `<span class="mono soluk">${v.ozet.odenmis} / ${v.ozet.adet} kalem ödendi</span>`);
-  ozetK.querySelector(".kart-govde").innerHTML = pbler.length
-    ? `<table class="mini kasa-ozet"><thead><tr><th></th><th>Ödenecek (hesaplanan)</th><th>Ödenen</th><th>Kalan</th></tr></thead><tbody>
-      ${pbler.map((pb) => `<tr><td class="pb">${pb}</td><td>${sayiMetni(v.ozet.toplam[pb] || 0)}</td>
-        <td class="gelir">${sayiMetni(v.ozet.odenen[pb] || 0)}</td><td class="bakiye ${v.ozet.kalan[pb] ? "eksi" : ""}"><b>${sayiMetni(v.ozet.kalan[pb] || 0)}</b></td></tr>`).join("")}
-      ${anaSatirHtml([v.ozet.toplam, v.ozet.odenen, v.ozet.kalan])}
+  const curs = currencyList(v.summary.total, v.summary.paid);
+  const sumCard = card(`${v.name} · Summary`, `<span class="mono muted">${v.summary.paidCount} / ${plural(v.summary.count, "item")} paid</span>`);
+  sumCard.querySelector(".card-body").innerHTML = curs.length
+    ? `<table class="mini cash-sum"><thead><tr><th></th><th>To pay (calculated)</th><th>Paid</th><th>Remaining</th></tr></thead><tbody>
+      ${curs.map((cur) => `<tr><td class="cur">${cur}</td><td>${numText(v.summary.total[cur] || 0)}</td>
+        <td class="income">${numText(v.summary.paid[cur] || 0)}</td><td class="balance ${v.summary.remaining[cur] ? "neg" : ""}"><b>${numText(v.summary.remaining[cur] || 0)}</b></td></tr>`).join("")}
+      ${baseRowHtml([v.summary.total, v.summary.paid, v.summary.remaining])}
       </tbody></table>`
-    : bosSatir("Bu ay vadesi gelen ödeme yok. Ödemeler puantaj dönemleri açılıp kapandıkça oluşur.");
-  ana.appendChild(ozetK);
+    : emptyRow("No payments fall due this month. Payments appear as timesheet periods are opened and closed.");
+  main.appendChild(sumCard);
 
-  for (const g of v.gunler) {
-    const gk = el(`<div class="kart od-gun ${g.gecti ? "gecti" : ""}">
-      <div class="kart-bas"><h3>${kacir(tarihUzun(g.vade))}</h3><div class="sag">
-        ${g.ozet.odenmis < g.ozet.adet && g.vade < bugun ? `<span class="pul-d gider">vadesi geçti</span>` : ""}
-        <span class="mono soluk">${g.ozet.odenmis}/${g.ozet.adet} ödendi · kalan ${toplamMetni(g.ozet.kalan)}</span></div></div>
-      <div class="kart-govde"></div></div>`);
-    ana.appendChild(gk);
-    const govde = gk.querySelector(".kart-govde");
+  for (const g of v.days) {
+    const dayCard = el(`<div class="card pay-day ${g.past ? "past" : ""}">
+      <div class="card-head"><h3>${esc(longDate(g.due))}</h3><div class="right">
+        ${g.summary.paidCount < g.summary.count && g.due < today ? `<span class="spill expense">overdue</span>` : ""}
+        <span class="mono muted">${g.summary.paidCount}/${g.summary.count} paid · remaining ${totalText(g.summary.remaining)}</span></div></div>
+      <div class="card-body"></div></div>`);
+    main.appendChild(dayCard);
+    const body = dayCard.querySelector(".card-body");
 
-    for (const gr of g.gruplar) {
-      const anahtar = `${g.vade}|${gr.tur}`;
-      const tarih = OD.tarih[anahtar] || (g.vade < bugun ? bugun : g.vade);
-      const bekleyen = gr.kalemler.filter((k) => !k.odendi);
-      const grEl = el(`<div class="od-grup">
-        <div class="od-grup-bas"><b>${kacir(gr.ad)}</b>
-          <span class="soluk">${gr.ozet.odenmis}/${gr.ozet.adet} ödendi · toplam ${toplamMetni(gr.ozet.toplam)}</span>
-          <label class="kucuk-et">Ödeme tarihi <input type="date" class="od-tarih" value="${tarih}"></label>
-          <button class="dg ufak bas" data-is="tumu" ${bekleyen.length ? "" : "disabled"}>Tümü ödendi${bekleyen.length ? ` (${bekleyen.length})` : ""}</button>
+    for (const gr of g.groups) {
+      const key = `${g.due}|${gr.type}`;
+      const date = PY.date[key] || (g.due < today ? today : g.due);
+      const pending = gr.items.filter((k) => !k.paid);
+      const grEl = el(`<div class="pay-group">
+        <div class="pay-group-head"><b>${esc(gr.name)}</b>
+          <span class="muted">${gr.summary.paidCount}/${gr.summary.count} paid · total ${totalText(gr.summary.total)}</span>
+          <label class="small-label">Payment date <input type="date" class="pay-date" value="${date}"></label>
+          <button class="btn small primary" data-do="all" ${pending.length ? "" : "disabled"}>All paid${pending.length ? ` (${pending.length})` : ""}</button>
         </div>
-        <div class="tablo-sar od-sar"><table class="mini od-tablo"><thead><tr>
-          <th class="od-tik">Ödendi</th><th>${gr.tur === "kira" ? "Ev" : "Kişi"}</th><th>Açıklama</th><th class="sag-h">Hesaplanan</th>
-          <th class="sag-h">Ödenen</th><th>Not</th><th>Durum</th></tr></thead><tbody></tbody></table></div></div>`);
-      govde.appendChild(grEl);
+        <div class="table-wrap pay-wrap"><table class="mini pay-table"><thead><tr>
+          <th class="pay-check">Paid</th><th>${gr.type === "rent" ? "House" : "Person"}</th><th>Description</th><th class="r">Calculated</th>
+          <th class="r">Paid</th><th>Note</th><th>Status</th></tr></thead><tbody></tbody></table></div></div>`);
+      body.appendChild(grEl);
       const tbody = grEl.querySelector("tbody");
-      const tarihGir = grEl.querySelector(".od-tarih");
-      tarihGir.onchange = () => { OD.tarih[anahtar] = tarihGir.value; };
+      const dateInput = grEl.querySelector(".pay-date");
+      dateInput.onchange = () => { PY.date[key] = dateInput.value; };
 
-      for (const k of gr.kalemler) {
-        const o = k.odeme;
-        const link = k.personelKod && personelId.get(k.personelKod) ? `#d/personel/${personelId.get(k.personelKod)}`
-          : k.evKod && evId.get(k.evKod) ? `#d/ev/${evId.get(k.evKod)}` : "";
-        const fark = o && o.tutar !== o.sistemTutar ? o.tutar - o.sistemTutar : 0;
-        const notlar = [
-          k.uyari ? `<span class="pul-d duzeltildi" title="${kacir(k.uyari)}">kontrol</span>` : "",
-          k.degisti !== null && k.degisti !== undefined ? `<span class="pul-d duzeltildi" title="Ödendikten sonra hesap değişti">hesap değişti: ${sayiMetni(k.degisti)}</span>` : "",
-          k.kaynakYok ? `<span class="pul-d elle" title="Dönem yeniden açıldı ya da kayıt değişti; ödeme kaydı duruyor">kaynağı yok</span>` : "",
+      for (const k of gr.items) {
+        const o = k.payment;
+        const link = k.employeeCode && employeeId.get(k.employeeCode) ? `#d/employees/${employeeId.get(k.employeeCode)}`
+          : k.houseCode && houseId.get(k.houseCode) ? `#d/houses/${houseId.get(k.houseCode)}` : "";
+        const diff = o && o.amount !== o.systemAmount ? o.amount - o.systemAmount : 0;
+        const flags = [
+          k.warning ? `<span class="spill edited" title="${esc(k.warning)}">check</span>` : "",
+          k.changed !== null && k.changed !== undefined ? `<span class="spill edited" title="The calculation changed after payment">calculation changed: ${numText(k.changed)}</span>` : "",
+          k.noSource ? `<span class="spill manual" title="The period was reopened or the record changed; the payment record stays">no source</span>` : "",
         ].join(" ");
-        const tr = el(`<table><tr class="${k.odendi ? "odendi" : ""}" data-a="${kacir(k.anahtar)}">
-          <td class="od-tik"><input type="checkbox" ${k.odendi ? "checked" : ""}></td>
-          <td>${link ? `<a href="${link}">${kacir(k.kim)}</a>` : kacir(k.kim)}</td>
-          <td>${kacir(k.aciklama)}<div class="od-detay">${kacir(odemeDetayMetni(k))}</div></td>
-          <td class="sag-h mono">${sayiMetni(k.tutar)} ${kacir(k.paraBirimi)}</td>
-          <td class="sag-h"><input class="od-tutar" type="number" step="0.01" min="0" value="${o ? o.tutar : k.tutar}">
-            ${fark ? `<div class="od-fark ${fark < 0 ? "eksi" : ""}">${fark > 0 ? "+" : ""}${sayiMetni(fark)}</div>` : ""}</td>
-          <td><input class="od-not" placeholder="ör. elden, yuvarlandı" value="${kacir(o?.not || "")}"></td>
-          <td class="od-durum">${o ? `<span class="pul-d gelir">ödendi ${tarihKisa(o.tarih)}</span>` : `<span class="pul-d ${k.vade < bugun ? "gider" : ""}">bekliyor</span>`} ${notlar}</td>
+        const tr = el(`<table><tr class="${k.paid ? "paid" : ""}" data-a="${esc(k.key)}">
+          <td class="pay-check"><input type="checkbox" ${k.paid ? "checked" : ""}></td>
+          <td>${link ? `<a href="${link}">${esc(k.who)}</a>` : esc(k.who)}</td>
+          <td>${esc(k.description)}<div class="pay-detail">${esc(paymentDetailText(k))}</div></td>
+          <td class="r mono">${numText(k.amount)} ${esc(k.currency)}</td>
+          <td class="r"><input class="pay-amount" type="number" step="0.01" min="0" value="${o ? o.amount : k.amount}">
+            ${diff ? `<div class="pay-diff ${diff < 0 ? "neg" : ""}">${diff > 0 ? "+" : ""}${numText(diff)}</div>` : ""}</td>
+          <td><input class="pay-note" placeholder="e.g. in cash, rounded" value="${esc(o?.note || "")}"></td>
+          <td class="pay-state">${o ? `<span class="spill income">paid ${shortDate(o.date)}</span>` : `<span class="spill ${k.due < today ? "expense" : ""}">pending</span>`} ${flags}</td>
         </tr></table>`).querySelector("tr");
         tbody.appendChild(tr);
 
-        const kaydet = async (tarihi) => {
+        const save = async (onDate) => {
           try {
-            await api("/odeme", { method: "POST", body: JSON.stringify({ liste: [{
-              anahtar: k.anahtar, tarih: tarihi, tutar: tr.querySelector(".od-tutar").value, not: tr.querySelector(".od-not").value,
+            await api("/payments", { method: "POST", body: JSON.stringify({ list: [{
+              key: k.key, date: onDate, amount: tr.querySelector(".pay-amount").value, note: tr.querySelector(".pay-note").value,
             }] }) });
-            await durumYukle(); gezintiCiz();
+            await loadStatus(); renderNav();
             return true;
-          } catch (e) { hataBildir(e); return false; }
+          } catch (e) { toastError(e); return false; }
         };
-        const kutu = tr.querySelector("input[type=checkbox]");
-        kutu.onchange = async () => {
-          if (kutu.checked) {
-            if (await kaydet(tarihGir.value)) { bildir("Ödendi", `${k.kim} · ${sayiMetni(tr.querySelector(".od-tutar").value)} ${k.paraBirimi} kasaya gider olarak yazıldı.`, "iyi"); odemelerCiz(OD.ay); }
-            else kutu.checked = false;
+        const box = tr.querySelector("input[type=checkbox]");
+        box.onchange = async () => {
+          if (box.checked) {
+            if (await save(dateInput.value)) { toast("Paid", `${k.who} · ${numText(tr.querySelector(".pay-amount").value)} ${k.currency} written to the cash book as an expense.`, "good"); renderPayments(PY.month); }
+            else box.checked = false;
             return;
           }
-          const ok = await onay("Ödendi işareti kaldırılsın mı?", `${k.kim} · ${k.aciklama}. Kasadaki gider satırı da silinir.`, "Kaldır");
-          if (!ok) { kutu.checked = true; return; }
+          const ok = await confirmBox("Remove the paid mark?", `${k.who} · ${k.description}. The expense row in the cash book is deleted as well.`, "Remove");
+          if (!ok) { box.checked = true; return; }
           try {
-            await api("/odeme/geri-al", { method: "POST", body: JSON.stringify({ anahtar: k.anahtar }) });
-            bildir("Ödendi işareti kaldırıldı", "", "iyi");
-            await durumYukle(); gezintiCiz(); odemelerCiz(OD.ay);
-          } catch (e) { hataBildir(e); kutu.checked = true; }
+            await api("/payments/undo", { method: "POST", body: JSON.stringify({ key: k.key }) });
+            toast("Paid mark removed", "", "good");
+            await loadStatus(); renderNav(); renderPayments(PY.month);
+          } catch (e) { toastError(e); box.checked = true; }
         };
-        // Ödenmiş kalemde tutar ya da not değişirse kayıt (ve kasa satırı) güncellenir.
-        for (const sec of [".od-tutar", ".od-not"]) {
-          tr.querySelector(sec).onchange = async () => {
-            if (!k.odendi) return;
-            if (await kaydet(o.tarih)) { bildir("Ödeme güncellendi", "Kasadaki satır da güncellendi.", "iyi"); odemelerCiz(OD.ay); }
+        // When the amount or note of a paid item changes, the record (and its cash row) is updated.
+        for (const sel of [".pay-amount", ".pay-note"]) {
+          tr.querySelector(sel).onchange = async () => {
+            if (!k.paid) return;
+            if (await save(o.date)) { toast("Payment updated", "The cash row was updated too.", "good"); renderPayments(PY.month); }
           };
         }
       }
 
-      grEl.querySelector('[data-is="tumu"]').onclick = async () => {
-        const tutarlar = {};
-        for (const k of bekleyen) {
-          const tr = tbody.querySelector(`tr[data-a="${CSS.escape(k.anahtar)}"]`);
-          const t = Number(tr.querySelector(".od-tutar").value) || 0;
-          tutarlar[k.paraBirimi] = (tutarlar[k.paraBirimi] || 0) + t;
+      grEl.querySelector('[data-do="all"]').onclick = async () => {
+        const amounts = {};
+        for (const k of pending) {
+          const tr = tbody.querySelector(`tr[data-a="${CSS.escape(k.key)}"]`);
+          const t = Number(tr.querySelector(".pay-amount").value) || 0;
+          amounts[k.currency] = (amounts[k.currency] || 0) + t;
         }
-        const ok = await onay(`${gr.ad}: tümü ödendi mi?`,
-          `${bekleyen.length} kalem ${tarihKisa(tarihGir.value)} tarihiyle ödendi işaretlenecek: ${toplamMetni(tutarlar)}. Her biri kasaya gider olarak düşer.`, "Tümü ödendi");
+        const ok = await confirmBox(`${gr.name}: all paid?`,
+          `${plural(pending.length, "item")} will be marked paid on ${shortDate(dateInput.value)}: ${totalText(amounts)}. Each goes into the cash book as an expense.`, "All paid");
         if (!ok) return;
         try {
-          const liste = bekleyen.map((k) => {
-            const tr = tbody.querySelector(`tr[data-a="${CSS.escape(k.anahtar)}"]`);
-            return { anahtar: k.anahtar, tarih: tarihGir.value, tutar: tr.querySelector(".od-tutar").value, not: tr.querySelector(".od-not").value };
+          const list = pending.map((k) => {
+            const tr = tbody.querySelector(`tr[data-a="${CSS.escape(k.key)}"]`);
+            return { key: k.key, date: dateInput.value, amount: tr.querySelector(".pay-amount").value, note: tr.querySelector(".pay-note").value };
           });
-          const r = await api("/odeme", { method: "POST", body: JSON.stringify({ liste }) });
-          bildir("Tümü ödendi", `${r.adet} kalem kasaya gider olarak yazıldı.`, "iyi");
-          await durumYukle(); gezintiCiz(); odemelerCiz(OD.ay);
-        } catch (e) { hataBildir(e); }
+          const r = await api("/payments", { method: "POST", body: JSON.stringify({ list }) });
+          toast("All paid", `${plural(r.count, "item")} written to the cash book as expenses.`, "good");
+          await loadStatus(); renderNav(); renderPayments(PY.month);
+        } catch (e) { toastError(e); }
       };
     }
   }
 
-  if (!v.gunler.length) {
-    ana.appendChild(el(`<div class="kart"><div class="bos"><div class="bs">Bu ay ödeme günü yok</div>
-      <p>Yemek paraları ve kiralar puantaj dönemi açılınca, maaşlar dönem kapanınca burada listelenir.</p></div></div>`));
+  if (!v.days.length) {
+    main.appendChild(el(`<div class="card"><div class="empty"><div class="big">No payment days this month</div>
+      <p>Meal allowances and rents are listed here once a timesheet period is opened, salaries once it is closed.</p></div></div>`));
   }
 }
 
-/* ---------------- AYARLAR ---------------- */
+/* ---------------- SETTINGS ---------------- */
 
-function ayarlarCiz() {
-  const d = S.durum;
-  ana.innerHTML = "";
-  ana.appendChild(el(`<div class="sayfa-bas">
-    <div><h2>Ayarlar</h2><p>Belgelerin nereye yazılacağı ve yapay zekâ katmanının nasıl çalışacağı.</p></div>
+function renderSettings() {
+  const d = S.status;
+  main.innerHTML = "";
+  main.appendChild(el(`<div class="page-head">
+    <div><h2>Settings</h2><p>Where documents are written and how the AI layer works.</p></div>
   </div>`));
 
-  const modlar = [
-    ["karma", "Kural + yapay zekâ", "Önce dosya adı kuralları çalışır. Kural yeterince emin olamazsa belge Claude'a gönderilir. Günlük kullanım için en dengeli seçenek."],
-    ["sadeceAi", "Sadece yapay zekâ", "Her belge Claude'a gider. En isabetli sonuç, en yüksek maliyet."],
-    ["sadeceKural", "Sadece kural", "Hiçbir belge dışarı çıkmaz, internet gerekmez, ücretsizdir. Dosya adları düzensizse isabet oranı düşer."],
+  const modes = [
+    ["hybrid", "Rules + AI", "File-name rules run first. If the rules are not sure enough, the document is sent to Claude. The most balanced option for everyday use."],
+    ["aiOnly", "AI only", "Every document goes to Claude. The most accurate result, the highest cost."],
+    ["rulesOnly", "Rules only", "No document leaves the computer, no internet needed, free. Accuracy drops if file names are messy."],
   ];
 
-  const kart = el(`<div class="kart"><div class="ayar-blok">
+  const box = el(`<div class="card"><div class="settings">
 
-    <div class="ayar-sat">
-      <div class="et">Belge kökü<small>Tüm klasörlerin açılacağı ana dizin. Ağ sürücüsü de olabilir.</small></div>
-      <div><input type="text" id="ayKok" value="${kacir(d.belgeKoku)}">
-        <div class="ipuc">Değiştirirseniz eski klasörler taşınmaz — yeni kökte yapıyı baştan kurmanız gerekir.</div></div>
+    <div class="set-row">
+      <div class="label">Document root<small>The main folder all folders are created in. Can be a network drive.</small></div>
+      <div><input type="text" id="setRoot" value="${esc(d.documentRoot)}">
+        <div class="hint">If you change it the old folders are not moved — you need to build the structure again in the new root.</div></div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Yapay zekâ modu<small>Belgelerin nasıl sınıflandırılacağı.</small></div>
-      <div class="secim-grup" id="ayMod">
-        ${modlar.map(([v, b, a]) => `<label class="secim-og ${d.aiModu === v ? "secili" : ""}">
-          <input type="radio" name="aimod" value="${v}" ${d.aiModu === v ? "checked" : ""}>
-          <span><span class="bs">${b}</span><span class="ac">${a}</span></span></label>`).join("")}
+    <div class="set-row">
+      <div class="label">AI mode<small>How documents are classified.</small></div>
+      <div class="choice-group" id="setMode">
+        ${modes.map(([v, b, a]) => `<label class="choice ${d.aiMode === v ? "selected" : ""}">
+          <input type="radio" name="aimode" value="${v}" ${d.aiMode === v ? "checked" : ""}>
+          <span><span class="big">${b}</span><span class="desc">${a}</span></span></label>`).join("")}
       </div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Claude API anahtarı<small>Yapay zekâ katmanı için gerekir. Bilgisayardan dışarı çıkmaz, veri/db.json içinde saklanır.</small></div>
-      <div><input type="password" id="ayAnahtar" placeholder="${d.apiAnahtariVar ? "•••••••• (kayıtlı, değiştirmek için yeni anahtar yazın)" : "sk-ant-..."}">
-        <div class="ipuc">Şu an: <b>${d.apiAnahtariVar ? `açık — kaynak: ${kacir(d.apiKaynagi)}` : "kapalı"}</b>.
-        Anahtarı console.anthropic.com adresinden alırsınız. Kullanılan model: claude-opus-5.</div></div>
+    <div class="set-row">
+      <div class="label">Claude API key<small>Needed for the AI layer. It never leaves this computer and is stored in data/db.json.</small></div>
+      <div><input type="password" id="setKey" placeholder="${d.apiKeySet ? "•••••••• (saved; type a new key to change it)" : "sk-ant-..."}">
+        <div class="hint">Now: <b>${d.apiKeySet ? `on — source: ${esc(d.apiKeySource)}` : "off"}</b>.
+        Get a key at console.anthropic.com. Model used: claude-opus-5.</div></div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Sesli komut<small>Konuşarak puantaj, avans, kasa ve ödeme kaydı. Ses ve cümle asistan sunucusuna (n8n) gider.</small></div>
+    <div class="set-row">
+      <div class="label">Voice commands<small>Record timesheets, advances, cash and payments by speaking. The audio and the sentence go to the assistant server (n8n).</small></div>
       <div>
-        <input type="text" id="ayAsAdres" value="${kacir(d.asistan?.adres || "")}" placeholder="${kacir(d.asistan?.varsayilanAdres || "https://n8n.ornek.com")} (boş bırakılabilir)" autocomplete="off">
-        <input type="password" id="ayAsAnahtar" style="margin-top:6px" autocomplete="off"
-          placeholder="${d.asistan?.anahtarVar ? "•••••••• (kayıtlı, değiştirmek için yeni anahtar yazın)" : d.asistan?.gomulu ? "programda hazır — bir şey girmeniz gerekmez" : "asistan anahtarı"}">
-        <div class="ipuc">Şu an: <b>${d.asistan?.hazir ? "açık" : "kapalı"}</b>. ${d.asistan?.gomulu ? "Anahtar programla birlikte geldi." : "Anahtarı sistemi kuran kişi verir."} Adres boş kalırsa varsayılan sunucu kullanılır.
-          Anahtar bu bilgisayarda kalır, yedeğe girmez. Asistan sunucusuna personel adları ile puantaj, avans, ödeme ve kasa özetleri gider;
-          IBAN, telefon, pasaport ve notlar gitmez. Asistanı iyileştirmek için söylenen komut, asistanın yaptığı işlem ve
-          sonucu (onaylandı / vazgeçildi / geri alındı) sunucuda kayıt altına alınır; ses kaydedilmez.</div>
+        <input type="text" id="setVaUrl" value="${esc(d.assistant?.url || "")}" placeholder="${esc(d.assistant?.defaultUrl || "https://n8n.example.com")} (can be left empty)" autocomplete="off">
+        <input type="password" id="setVaKey" style="margin-top:6px" autocomplete="off"
+          placeholder="${d.assistant?.keySet ? "•••••••• (saved; type a new key to change it)" : d.assistant?.embedded ? "built into the program — nothing to enter" : "assistant key"}">
+        <div class="hint">Now: <b>${d.assistant?.ready ? "on" : "off"}</b>. ${d.assistant?.embedded ? "The key came with the program." : "The person who set up the system gives you the key."} If the address is empty the default server is used.
+          The key stays on this computer and is not included in backups. Employee names and timesheet, advance, payment and cash summaries go to the assistant server;
+          IBANs, phone numbers, passports and notes do not. To improve the assistant, the spoken command, the action it took and the
+          outcome (approved / cancelled / undone) are logged on the server; audio is not stored.</div>
       </div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Yapay zekâya sorma eşiği<small>Kural motorunun güveni bu değerin altındaysa Claude devreye girer.</small></div>
-      <div><input type="number" id="ayEsik" min="0" max="1" step="0.01" value="${d.esik}">
-        <div class="ipuc">Yükseltirseniz daha çok belge Claude'a gider (daha isabetli, daha pahalı). Sadece "Kural + yapay zekâ" modunda etkilidir.</div></div>
+    <div class="set-row">
+      <div class="label">AI threshold<small>If the rule engine's confidence is below this value, Claude steps in.</small></div>
+      <div><input type="number" id="setThreshold" min="0" max="1" step="0.01" value="${d.threshold}">
+        <div class="hint">Raise it and more documents go to Claude (more accurate, more expensive). Only applies in "Rules + AI" mode.</div></div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Kullanıcı adı<small>Belge Defteri'ne kimin işlem yaptığı yazılır.</small></div>
-      <div><input type="text" id="ayKullanici" value="${kacir(d.kullanici)}"></div>
+    <div class="set-row">
+      <div class="label">User name<small>Written in the Document Register as the person who acted.</small></div>
+      <div><input type="text" id="setUser" value="${esc(d.user)}"></div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Para birimi ve kur<small>Kur elle girilir; internetten çekilmez.</small></div>
+    <div class="set-row">
+      <div class="label">Currency and rates<small>Rates are entered by hand; nothing is fetched from the internet.</small></div>
       <div>
-        <label class="kur-sat"><span>Ana para birimi</span><select id="ayAnaPB">${["EUR", "TRY", "RSD"].map((pb) =>
-          `<option ${(d.kur?.ana || "EUR") === pb ? "selected" : ""}>${pb}</option>`).join("")}</select></label>
-        <div id="ayKurlar"></div>
-        <div class="ipuc">Puantajda maaştan farklı para birimindeki yemek, kira ve avans bu kurla çevrilip maaştan düşülür
-          (ör. 600 RSD ÷ 117 = 5,13 EUR). Kasa, Ödemeler ve puantaj özetlerindeki "≈" satırı ana para birimindeki karşılıktır.<br>
-          Yeni açılan puantaj dönemleri kuru buradan kopyalar; açık bir dönemin kuru puantaj panelinden "Güncel kuru al" ile değişir.
-          Kapalı dönemler ve "ödendi" işaretlenmiş ödemeler değişmez.</div>
+        <label class="rate-row"><span>Base currency</span><select id="setBase">${["EUR", "TRY", "RSD"].map((cur) =>
+          `<option ${(d.rates?.base || "EUR") === cur ? "selected" : ""}>${cur}</option>`).join("")}</select></label>
+        <div id="setRates"></div>
+        <div class="hint">In timesheets, meals, rent and advances in a currency other than the salary's are converted at these rates and deducted from pay
+          (e.g. 600 RSD ÷ 117 = 5.13 EUR). The "≈" row in Cash, Payments and timesheet summaries is the value in the base currency.<br>
+          Newly opened timesheet periods copy the rates from here; an open period's rates change with "Use the current rates" in the timesheet panel.
+          Closed periods and payments marked "paid" do not change.</div>
       </div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Görünüm<small>Koyu ve açık tema.</small></div>
-      <div><select id="ayTema">
-        <option value="">Sistem ayarını kullan</option>
-        <option value="light">Açık</option>
-        <option value="dark">Koyu</option>
+    <div class="set-row">
+      <div class="label">Appearance<small>Dark and light theme.</small></div>
+      <div><select id="setTheme">
+        <option value="">Follow the system</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
       </select></div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Veri ve yedek<small>Kayıtları başka bir bilgisayara taşımak ya da yedeklemek için.</small></div>
+    <div class="set-row">
+      <div class="label">Data and backup<small>To move the records to another computer or keep a backup.</small></div>
       <div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="dg" id="yedekIndir">Yedeği indir</button>
-          <button class="dg" id="yedekYukle">Yedekten yükle…</button>
-          <input type="file" id="yedekDosya" accept=".json,application/json" hidden>
+          <button class="btn" id="backupDownload">Download backup</button>
+          <button class="btn" id="backupUpload">Restore from backup…</button>
+          <input type="file" id="backupFile" accept=".json,application/json" hidden>
         </div>
-        <div class="ipuc">Yedek, tüm kayıtları (personel, ekipler, puantaj, kasa, öngörü…) tek bir <b>.json</b> dosyasına yazar.
-          Başka bilgisayarda "Yedekten yükle" ile açılır; oradaki kayıtların yerini alır, eskileri önce
-          <code style="font-family:var(--f-mono)">veri/yedekler</code> klasörüne saklanır. API anahtarı yedeğe girmez.<br>
-          Belgeler (PDF, fotoğraf) yedeğe girmez; gerekirse şu klasörü ayrıca kopyalayın:
-          <code style="font-family:var(--f-mono)">${kacir(d.belgeKoku)}</code></div>
+        <div class="hint">A backup writes every record (employees, crews, timesheets, cash, forecast…) into a single <b>.json</b> file.
+          On another computer, open it with "Restore from backup"; it replaces the records there, and the old ones are first saved in the
+          <code style="font-family:var(--f-mono)">data/backups</code> folder. The API key is not included in the backup.<br>
+          Documents (PDFs, photos) are not included either; copy this folder separately if needed:
+          <code style="font-family:var(--f-mono)">${esc(d.documentRoot)}</code></div>
       </div>
     </div>
 
-    <div class="ayar-sat">
-      <div class="et">Kayıtları sıfırla<small>Deneme kayıtlarından kurtulup temiz başlamak için.</small></div>
+    <div class="set-row">
+      <div class="label">Reset records<small>To get rid of test records and start clean.</small></div>
       <div>
-        <button class="dg tehlike" id="sifirla">Tüm kayıtları sil…</button>
-        <div class="ipuc">Personel, ekip, proje, ev, araç, müşteri, zimmet, avans, puantaj, kasa, ödeme ve Belge Defteri kayıtları silinir.
-          Ayarlar (belge kökü, kur, API anahtarı) kalır. Silmeden önce otomatik yedek alınır
-          (<code style="font-family:var(--f-mono)">veri/yedekler</code>); yanlışlıkla silinirse "Yedekten yükle" ile geri gelir.</div>
+        <button class="btn danger" id="resetAll">Delete all records…</button>
+        <div class="hint">Employee, crew, project, house, vehicle, client, equipment, advance, timesheet, cash, payment and Document Register records are deleted.
+          Settings (document root, rates, API key) stay. A backup is taken automatically before deleting
+          (<code style="font-family:var(--f-mono)">data/backups</code>); if you delete by mistake, "Restore from backup" brings it back.</div>
       </div>
     </div>
 
   </div>
-  <div class="kart-bas" style="border-top:1px solid var(--line);border-bottom:0">
-    <div class="sag" style="margin-left:0"><button class="dg bas" id="ayKaydet">Ayarları kaydet</button></div>
+  <div class="card-head" style="border-top:1px solid var(--line);border-bottom:0">
+    <div class="right" style="margin-left:0"><button class="btn primary" id="setSave">Save settings</button></div>
   </div></div>`);
-  ana.appendChild(kart);
+  main.appendChild(box);
 
-  const temaSec = kart.querySelector("#ayTema");
-  temaSec.value = localStorage.getItem("kadro-tema") || "";
-  temaSec.onchange = () => {
-    const v = temaSec.value;
-    if (v) { document.documentElement.setAttribute("data-theme", v); localStorage.setItem("kadro-tema", v); }
-    else { document.documentElement.removeAttribute("data-theme"); localStorage.removeItem("kadro-tema"); }
+  const themeSelect = box.querySelector("#setTheme");
+  try { themeSelect.value = localStorage.getItem("kadro-theme") || ""; } catch { /* no storage */ }
+  themeSelect.onchange = () => {
+    const v = themeSelect.value;
+    try {
+      if (v) { document.documentElement.setAttribute("data-theme", v); localStorage.setItem("kadro-theme", v); }
+      else { document.documentElement.removeAttribute("data-theme"); localStorage.removeItem("kadro-theme"); }
+    } catch { /* no storage */ }
   };
 
-  kart.querySelectorAll('input[name="aimod"]').forEach((r) => {
-    r.onchange = () => kart.querySelectorAll(".secim-og").forEach((o) => o.classList.toggle("secili", o.contains(r) && r.checked));
+  box.querySelectorAll('input[name="aimode"]').forEach((r) => {
+    r.onchange = () => box.querySelectorAll(".choice").forEach((o) => o.classList.toggle("selected", o.contains(r) && r.checked));
   });
 
-  // Kur: 1 ana = x diğer. Ana para birimi değişince girilmiş oranlar yeni anaya göre yeniden yazılır.
-  const kurD = { ana: d.kur?.ana || "EUR", oran: { ...(d.kur?.oran || {}) } };
-  const kurKutu = kart.querySelector("#ayKurlar");
-  const kurOku = () => {
-    for (const i of kurKutu.querySelectorAll("[data-kur]")) {
-      const n = Number(i.value.replace(",", "."));
-      if (i.value.trim() && n > 0) kurD.oran[i.dataset.kur] = n; else delete kurD.oran[i.dataset.kur];
+  // Rates: 1 base = x of another. When the base currency changes, the rates entered are rewritten against the new base.
+  const rateData = { base: d.rates?.base || "EUR", rate: { ...(d.rates?.rate || {}) } };
+  const rateBox = box.querySelector("#setRates");
+  const readRates = () => {
+    for (const i of rateBox.querySelectorAll("[data-rate]")) {
+      const n = Number(i.value);
+      if (i.value.trim() && n > 0) rateData.rate[i.dataset.rate] = n; else delete rateData.rate[i.dataset.rate];
     }
   };
-  const kurCiz = () => {
-    kurKutu.innerHTML = ["EUR", "TRY", "RSD"].filter((pb) => pb !== kurD.ana).map((pb) =>
-      `<label class="kur-sat"><span>1 ${kurD.ana} =</span><input type="number" step="any" min="0" data-kur="${pb}" value="${kurD.oran[pb] ?? ""}" placeholder="girilmedi"><span>${pb}</span></label>`).join("");
+  const drawRates = () => {
+    rateBox.innerHTML = ["EUR", "TRY", "RSD"].filter((cur) => cur !== rateData.base).map((cur) =>
+      `<label class="rate-row"><span>1 ${rateData.base} =</span><input type="number" step="any" min="0" data-rate="${cur}" value="${rateData.rate[cur] ?? ""}" placeholder="not entered"><span>${cur}</span></label>`).join("");
   };
-  kurCiz();
-  kart.querySelector("#ayAnaPB").onchange = (ev) => {
-    kurOku();
-    const yeni = ev.target.value;
-    const o = { ...kurD.oran, [kurD.ana]: 1 };
-    const oran = {};
-    if (o[yeni]) for (const [pb, v] of Object.entries(o)) if (pb !== yeni) oran[pb] = Number((v / o[yeni]).toPrecision(10));
-    kurD.ana = yeni; kurD.oran = oran;
-    kurCiz();
+  drawRates();
+  box.querySelector("#setBase").onchange = (ev) => {
+    readRates();
+    const next = ev.target.value;
+    const o = { ...rateData.rate, [rateData.base]: 1 };
+    const rate = {};
+    if (o[next]) for (const [cur, v] of Object.entries(o)) if (cur !== next) rate[cur] = Number((v / o[next]).toPrecision(10));
+    rateData.base = next; rateData.rate = rate;
+    drawRates();
   };
 
-  kart.querySelector("#yedekIndir").onclick = () => { location.href = "/api/yedek"; };
-  const yedekDosya = kart.querySelector("#yedekDosya");
-  kart.querySelector("#yedekYukle").onclick = () => yedekDosya.click();
-  yedekDosya.onchange = async () => {
-    const f = yedekDosya.files[0];
-    yedekDosya.value = "";
+  box.querySelector("#backupDownload").onclick = () => { location.href = "/api/backup"; };
+  const backupFile = box.querySelector("#backupFile");
+  box.querySelector("#backupUpload").onclick = () => backupFile.click();
+  backupFile.onchange = async () => {
+    const f = backupFile.files[0];
+    backupFile.value = "";
     if (!f) return;
-    const ok = await onay("Yedekten yüklensin mi?",
-      `"${f.name}" yüklenecek. Bu bilgisayardaki tüm kayıtlar yedektekilerle DEĞİŞTİRİLİR. ` +
-      "Mevcut kayıtlar önce veri/yedekler klasörüne kaydedilir. Belge kökü ve API anahtarı bu bilgisayardaki gibi kalır.", "Yedekten yükle");
+    const ok = await confirmBox("Restore from backup?",
+      `"${f.name}" will be loaded. ALL records on this computer are REPLACED with those in the backup. ` +
+      "The current records are saved in the data/backups folder first. The document root and API key stay as they are on this computer.", "Restore from backup");
     if (!ok) return;
-    const fd = new FormData(); fd.append("dosya", f);
+    const fd = new FormData(); fd.append("file", f);
     try {
-      const r = await api("/yedek", { method: "POST", body: fd });
-      const z = r.sayilar;
-      bildir("Yedek yüklendi", `${z.personel} personel, ${z.ekip} ekip, ${z.proje} proje, ${z.puantaj} puantaj dönemi, ${z.kasa} kasa satırı. ` +
-        `Önceki kayıtlar: ${r.eskiYedek}`, "iyi");
-      S.agac = null; S.hedefler = [];
-      for (const k of Object.keys(tabloDurum)) delete tabloDurum[k];
-      await durumYukle(); gezintiCiz(); ayarlarCiz();
-    } catch (e) { hataBildir(e); }
+      const r = await api("/backup", { method: "POST", body: fd });
+      const z = r.counts;
+      toast("Backup restored", `${plural(z.employees, "employee")}, ${plural(z.crews, "crew")}, ${plural(z.projects, "project")}, ${z.timesheets} timesheet periods, ${z.cash} cash rows. ` +
+        `Previous records: ${r.previousBackup}`, "good");
+      S.tree = null; S.targets = [];
+      for (const k of Object.keys(tableState)) delete tableState[k];
+      await loadStatus(); renderNav(); renderSettings();
+    } catch (e) { toastError(e); }
   };
 
-  kart.querySelector("#sifirla").onclick = async () => {
-    const secim = await sifirlaPano();
-    if (!secim) return;
+  box.querySelector("#resetAll").onclick = async () => {
+    const choice = await resetModal();
+    if (!choice) return;
     try {
-      const r = await api("/sifirla", { method: "POST", body: JSON.stringify({ onay: "SİL", belgeler: secim.belgeler }) });
-      bildir("Kayıtlar sıfırlandı", `Önceki kayıtların yedeği: ${r.yedek}` +
-        (r.eskiKok ? `. Eski belgeler kenara alındı: ${r.eskiKok}` : ""), "iyi");
-      S.agac = null; S.hedefler = [];
-      for (const k of Object.keys(tabloDurum)) delete tabloDurum[k];
-      await durumYukle(); gezintiCiz(); ayarlarCiz();
-    } catch (e) { hataBildir(e); }
+      const r = await api("/reset", { method: "POST", body: JSON.stringify({ confirm: "DELETE", documents: choice.documents }) });
+      toast("Records reset", `Backup of the previous records: ${r.backup}` +
+        (r.oldRoot ? `. Old documents were set aside: ${r.oldRoot}` : ""), "good");
+      S.tree = null; S.targets = [];
+      for (const k of Object.keys(tableState)) delete tableState[k];
+      await loadStatus(); renderNav(); renderSettings();
+    } catch (e) { toastError(e); }
   };
 
-  kart.querySelector("#ayKaydet").onclick = async (ev) => {
+  box.querySelector("#setSave").onclick = async (ev) => {
     ev.target.disabled = true;
-    const yeni = {
-      belgeKoku: kart.querySelector("#ayKok").value.trim(),
-      aiModu: kart.querySelector('input[name="aimod"]:checked')?.value || "karma",
-      esik: Number(kart.querySelector("#ayEsik").value),
-      kullanici: kart.querySelector("#ayKullanici").value.trim() || "Yönetici",
+    const next = {
+      documentRoot: box.querySelector("#setRoot").value.trim(),
+      aiMode: box.querySelector('input[name="aimode"]:checked')?.value || "hybrid",
+      threshold: Number(box.querySelector("#setThreshold").value),
+      user: box.querySelector("#setUser").value.trim() || "Manager",
     };
-    kurOku();
-    yeni.kur = { ana: kurD.ana, oran: kurD.oran };
-    const anahtar = kart.querySelector("#ayAnahtar").value.trim();
-    if (anahtar) yeni.apiAnahtari = anahtar;
-    yeni.asistanAdres = kart.querySelector("#ayAsAdres").value.trim();
-    const asAnahtar = kart.querySelector("#ayAsAnahtar").value.trim();
-    if (asAnahtar) yeni.asistanAnahtari = asAnahtar;
+    readRates();
+    next.rates = { base: rateData.base, rate: rateData.rate };
+    const key = box.querySelector("#setKey").value.trim();
+    if (key) next.apiKey = key;
+    next.assistantUrl = box.querySelector("#setVaUrl").value.trim();
+    const vaKey = box.querySelector("#setVaKey").value.trim();
+    if (vaKey) next.assistantKey = vaKey;
     try {
-      await api("/ayarlar", { method: "POST", body: JSON.stringify(yeni) });
-      bildir("Ayarlar kaydedildi", "", "iyi");
-      S.agac = null; S.hedefler = [];
-      await durumYukle(); ustBilgiCiz(); ayarlarCiz();
-    } catch (e) { hataBildir(e); }
+      await api("/settings", { method: "POST", body: JSON.stringify(next) });
+      toast("Settings saved", "", "good");
+      S.tree = null; S.targets = [];
+      await loadStatus(); renderHeader(); renderSettings();
+    } catch (e) { toastError(e); }
     ev.target.disabled = false;
   };
 }
 
-/** Sıfırlama onayı: iki adım. 1) ne silineceği ve belge klasörü seçimi, 2) "SİL" yazarak onay. Döner: { belgeler } ya da null. */
-function sifirlaPano() {
-  return new Promise((coz) => {
-    const s = S.durum.sayilar;
-    const p = el(`<div class="pano"><div class="pano-ic">
-      <div class="pano-bas"><h3>Tüm kayıtlar silinsin mi?</h3></div>
-      <div class="pano-govde">
-        <div data-adim="1">
-          <p style="margin:0 0 10px">Şu kayıtlar silinecek: ${s.personel} personel, ${s.ekip} ekip, ${s.proje} aktif proje, ${s.ev} ev,
-            ${s.arac} araç, ${s.musteri} müşteri, ${s.avans} avans, ${s.kasa} kasa satırı, ${s.belge} belge kaydı ve bütün puantaj dönemleri.</p>
-          <p style="margin:0 0 12px" class="soluk">Silmeden önce otomatik yedek alınır. Ayarlar (belge kökü, kur, API anahtarı) kalır.</p>
+/** Reset confirmation in two steps: 1) what will be deleted and the documents-folder choice, 2) confirm by typing "DELETE". Returns { documents } or null. */
+function resetModal() {
+  return new Promise((resolve) => {
+    const s = S.status.counts;
+    const p = el(`<div class="modal"><div class="modal-box">
+      <div class="modal-head"><h3>Delete all records?</h3></div>
+      <div class="modal-body">
+        <div data-step="1">
+          <p style="margin:0 0 10px">These records will be deleted: ${plural(s.employees, "employee")}, ${plural(s.crews, "crew")}, ${s.projects} active projects, ${s.houses} houses,
+            ${s.vehicles} vehicles, ${s.clients} clients, ${s.advances} advances, ${s.cash} cash rows, ${s.documents} document records and every timesheet period.</p>
+          <p style="margin:0 0 12px" class="muted">A backup is taken automatically before deleting. Settings (document root, rates, API key) stay.</p>
           <label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer">
-            <input type="checkbox" data-belge style="margin-top:3px;accent-color:var(--kotu)">
-            <span><b>Belge klasörünü de temizle</b><br><span class="soluk" style="font-size:12.5px">Belgeler silinmez:
-              <code style="font-family:var(--f-mono)">${kacir(S.durum.belgeKoku)}</code> klasörü "(eski tarih)" adıyla kenara alınır,
-              yerine boş klasör yapısı kurulur. İşaretlemezseniz belgeler olduğu gibi kalır.</span></span>
+            <input type="checkbox" data-docs style="margin-top:3px;accent-color:var(--bad)">
+            <span><b>Clear the documents folder too</b><br><span class="muted" style="font-size:12.5px">Documents are not deleted:
+              the <code style="font-family:var(--f-mono)">${esc(S.status.documentRoot)}</code> folder is set aside as "(old date)"
+              and an empty folder structure is built in its place. If you leave this unticked the documents stay as they are.</span></span>
           </label>
         </div>
-        <div data-adim="2" hidden>
-          <p style="margin:0 0 10px">Son adım. Onaylamak için kutuya büyük harflerle <b>SİL</b> yazın.</p>
-          <input type="text" data-yazi autocomplete="off" style="width:100%;padding:8px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);font-size:14px">
+        <div data-step="2" hidden>
+          <p style="margin:0 0 10px">Last step. To confirm, type <b>DELETE</b> in capitals in the box.</p>
+          <input type="text" data-typed autocomplete="off" style="width:100%;padding:8px 10px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);font-size:14px">
         </div>
       </div>
-      <div class="pano-alt"><button class="dg" data-h>Vazgeç</button><button class="dg bas" data-e>Devam et</button></div>
+      <div class="modal-foot"><button class="btn" data-no>Cancel</button><button class="btn primary" data-yes>Continue</button></div>
     </div></div>`);
-    const kapat = (v) => { p.remove(); coz(v); };
-    const e = p.querySelector("[data-e]"), yazi = p.querySelector("[data-yazi]");
-    let adim = 1;
-    p.querySelector("[data-h]").onclick = () => kapat(null);
-    p.onclick = (ev) => { if (ev.target === p) kapat(null); };
-    // Türkçe klavyesi olmayan bilgisayarda "SIL" de kabul edilir.
-    yazi.oninput = () => { e.disabled = !["SİL", "SIL"].includes(yazi.value.trim().toLocaleUpperCase("tr")); };
+    const close = (v) => { p.remove(); resolve(v); };
+    const e = p.querySelector("[data-yes]"), typed = p.querySelector("[data-typed]");
+    let step = 1;
+    p.querySelector("[data-no]").onclick = () => close(null);
+    p.onclick = (ev) => { if (ev.target === p) close(null); };
+    typed.oninput = () => { e.disabled = typed.value.trim().toUpperCase() !== "DELETE"; };
     e.onclick = () => {
-      if (adim === 1) {
-        adim = 2;
-        p.querySelector('[data-adim="1"]').hidden = true;
-        p.querySelector('[data-adim="2"]').hidden = false;
-        e.textContent = "Tüm kayıtları sil"; e.disabled = true; e.style.background = "var(--kotu)"; e.style.borderColor = "var(--kotu)";
-        yazi.focus();
+      if (step === 1) {
+        step = 2;
+        p.querySelector('[data-step="1"]').hidden = true;
+        p.querySelector('[data-step="2"]').hidden = false;
+        e.textContent = "Delete all records"; e.disabled = true; e.style.background = "var(--bad)"; e.style.borderColor = "var(--bad)";
+        typed.focus();
         return;
       }
-      kapat({ belgeler: p.querySelector("[data-belge]").checked });
+      close({ documents: p.querySelector("[data-docs]").checked });
     };
-    document.getElementById("panoAlani").appendChild(p);
+    document.getElementById("modalHost").appendChild(p);
     e.focus();
   });
 }
 
-/* ---------------- SESLİ KOMUT ---------------- */
+/* ---------------- VOICE COMMANDS ---------------- */
 
-// Konuşma → n8n (yazıya dökme + model) → onay kartları. Hiçbir şey Onayla'ya basılmadan yazılmaz.
-const AS = { konusmaId: null, kayit: null, parcalar: [], baslangic: 0, sayac: null, mesgul: false };
-const MIK_SVG = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>`;
+// Speech → n8n (transcription + model) → confirmation cards. Nothing is written until Approve is pressed.
+const VA = { conversationId: null, recorder: null, chunks: [], started: 0, timer: null, busy: false };
+const MIC_SVG = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>`;
 
-function asistanDugmesiKur() {
-  const d = el(`<button class="as-dugme" id="asDugme" title="Sesli komut" aria-label="Sesli komut">${MIK_SVG}</button>`);
-  d.onclick = () => (document.getElementById("asPano") ? asistanKapat() : asistanAc());
+function setUpAssistantButton() {
+  const d = el(`<button class="va-button" id="vaButton" title="Voice commands" aria-label="Voice commands">${MIC_SVG}</button>`);
+  d.onclick = () => (document.getElementById("vaPanel") ? closeAssistant() : openAssistant());
   document.body.appendChild(d);
 }
 
-function asistanKapat() {
-  if (AS.kayit?.state === "recording") AS.kayit.stop();
-  document.getElementById("asPano")?.remove();
-  document.getElementById("asDugme")?.classList.remove("acik");
+function closeAssistant() {
+  if (VA.recorder?.state === "recording") VA.recorder.stop();
+  document.getElementById("vaPanel")?.remove();
+  document.getElementById("vaButton")?.classList.remove("open");
 }
 
-async function asistanAc() {
-  const hazir = S.durum?.asistan?.hazir;
-  const p = el(`<aside class="as-pano" id="asPano" aria-label="Sesli komut">
-    <div class="as-bas"><h3>Sesli komut</h3>
-      <button class="dg ufak" data-yeni title="Önceki konuşmayı unut">Yeni konuşma</button>
-      <button class="as-kapat" data-kapat aria-label="Kapat">×</button></div>
-    <div class="as-akis" data-akis>
-      ${hazir ? `<div class="as-ipucu">Mikrofona dokunup konuşun, bitince tekrar dokunun. Örnek:<br>
-        <i>"Yiğit bugün gelmedi, Burak 10 saat çalıştı"</i> · <i>"Mehmet'e 100 euro avans verdim"</i> ·
-        <i>"Yiğit bu ay ne alacak?"</i><br>Hiçbir şey siz <b>Onayla</b>'ya basmadan yazılmaz.</div>`
-        : `<div class="as-ipucu">Sesli komut henüz açık değil. Size verilen anahtarı <a href="#ayarlar">Ayarlar</a> → Sesli komut alanına girin.</div>`}
+async function openAssistant() {
+  const ready = S.status?.assistant?.ready;
+  const p = el(`<aside class="va-panel" id="vaPanel" aria-label="Voice commands">
+    <div class="va-head"><h3>Voice commands</h3>
+      <button class="btn small" data-new title="Forget the previous conversation">New conversation</button>
+      <button class="va-close" data-close aria-label="Close">×</button></div>
+    <div class="va-flow" data-flow>
+      ${ready ? `<div class="va-hint">Tap the microphone and speak, tap again when you are done. For example:<br>
+        <i>"Cem was absent today, Tolga worked 10 hours"</i> · <i>"I gave Mehmet a 100 euro advance"</i> ·
+        <i>"How much will Murat get this month?"</i><br>Nothing is written until you press <b>Approve</b>.</div>`
+        : `<div class="va-hint">Voice commands are not switched on yet. Enter the key you were given under <a href="#settings">Settings</a> → Voice commands.</div>`}
     </div>
-    <div class="as-alt">
-      <button class="as-mik" data-mik ${hazir ? "" : "disabled"}>${MIK_SVG}<span>Konuşmak için dokunun</span></button>
-      <form class="as-form" data-form><input type="text" data-metin placeholder="ya da yazın…" autocomplete="off" ${hazir ? "" : "disabled"}>
-        <button class="dg" ${hazir ? "" : "disabled"}>Gönder</button></form>
+    <div class="va-foot">
+      <button class="va-mic" data-mic ${ready ? "" : "disabled"}>${MIC_SVG}<span>Tap to speak</span></button>
+      <form class="va-form" data-form><input type="text" data-text placeholder="or type…" autocomplete="off" ${ready ? "" : "disabled"}>
+        <button class="btn" ${ready ? "" : "disabled"}>Send</button></form>
     </div>
-    <details class="as-gunluk" data-gunluk><summary>Son işlemler</summary><div data-gunluk-liste><div class="soluk">Yükleniyor…</div></div></details>
+    <details class="va-log" data-log><summary>Recent actions</summary><div data-log-list><div class="muted">Loading…</div></div></details>
   </aside>`);
   document.body.appendChild(p);
-  document.getElementById("asDugme").classList.add("acik");
-  p.querySelector("[data-kapat]").onclick = asistanKapat;
-  p.querySelector("[data-yeni]").onclick = () => {
-    AS.konusmaId = null;
-    p.querySelector("[data-akis]").querySelectorAll(".as-balon,.as-kart,.as-cevap").forEach((x) => x.remove());
+  document.getElementById("vaButton").classList.add("open");
+  p.querySelector("[data-close]").onclick = closeAssistant;
+  p.querySelector("[data-new]").onclick = () => {
+    VA.conversationId = null;
+    p.querySelector("[data-flow]").querySelectorAll(".va-bubble,.va-card,.va-reply").forEach((x) => x.remove());
   };
-  p.querySelector("[data-mik]").onclick = () => (AS.kayit?.state === "recording" ? AS.kayit.stop() : kayitBaslat());
+  p.querySelector("[data-mic]").onclick = () => (VA.recorder?.state === "recording" ? VA.recorder.stop() : startRecording());
   p.querySelector("[data-form]").onsubmit = (ev) => {
     ev.preventDefault();
-    const i = p.querySelector("[data-metin]");
+    const i = p.querySelector("[data-text]");
     const m = i.value.trim();
-    if (!m || AS.mesgul) return;
+    if (!m || VA.busy) return;
     i.value = "";
-    komutGonder({ metin: m });
+    sendCommand({ text: m });
   };
-  p.querySelector("[data-gunluk]").ontoggle = (ev) => { if (ev.target.open) gunlukCiz(); };
-  if (hazir) p.querySelector("[data-metin]").focus();
+  p.querySelector("[data-log]").ontoggle = (ev) => { if (ev.target.open) renderAssistantLog(); };
+  if (ready) p.querySelector("[data-text]").focus();
 }
 
-function akisaEkle(dugum) {
-  const akis = document.querySelector("#asPano [data-akis]");
-  if (!akis) return null;
-  akis.querySelector(".as-ipucu")?.remove();
-  akis.appendChild(dugum);
-  akis.scrollTop = akis.scrollHeight;
-  return dugum;
+function addToFlow(node) {
+  const flow = document.querySelector("#vaPanel [data-flow]");
+  if (!flow) return null;
+  flow.querySelector(".va-hint")?.remove();
+  flow.appendChild(node);
+  flow.scrollTop = flow.scrollHeight;
+  return node;
 }
 
-async function kayitBaslat() {
-  if (AS.mesgul) return;
+async function startRecording() {
+  if (VA.busy) return;
   if (!navigator.mediaDevices?.getUserMedia) {
-    return hataBildir(new Error("Bu tarayıcı mikrofona erişemiyor. Telefonda HTTPS adresinden açılmalı."));
+    return toastError(new Error("This browser cannot reach the microphone. On a phone it has to be opened from an HTTPS address."));
   }
-  let akim;
-  try { akim = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-  catch { return hataBildir(new Error("Mikrofon izni verilmedi. Tarayıcının adres çubuğundan mikrofona izin verin.")); }
-  const tur = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || "";
-  const k = new MediaRecorder(akim, tur ? { mimeType: tur } : undefined);
-  AS.kayit = k; AS.parcalar = []; AS.baslangic = Date.now();
-  const mik = document.querySelector("#asPano [data-mik]");
-  const yazi = mik?.querySelector("span");
-  mik?.classList.add("kayitta");
-  AS.sayac = setInterval(() => {
-    const sn = Math.floor((Date.now() - AS.baslangic) / 1000);
-    if (yazi) yazi.textContent = `Dinliyorum… ${sn} sn · bitince dokunun`;
-    if (sn >= 90) k.stop();   // uzun kayıt yerine kısa komutlar
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { return toastError(new Error("Microphone permission was not given. Allow the microphone from the browser's address bar.")); }
+  const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || "";
+  const k = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  VA.recorder = k; VA.chunks = []; VA.started = Date.now();
+  const mic = document.querySelector("#vaPanel [data-mic]");
+  const label = mic?.querySelector("span");
+  mic?.classList.add("recording");
+  VA.timer = setInterval(() => {
+    const sec = Math.floor((Date.now() - VA.started) / 1000);
+    if (label) label.textContent = `Listening… ${sec} s · tap when done`;
+    if (sec >= 90) k.stop();   // short commands instead of long recordings
   }, 250);
-  k.ondataavailable = (e) => { if (e.data.size) AS.parcalar.push(e.data); };
+  k.ondataavailable = (e) => { if (e.data.size) VA.chunks.push(e.data); };
   k.onstop = () => {
-    clearInterval(AS.sayac);
-    akim.getTracks().forEach((t) => t.stop());
-    mik?.classList.remove("kayitta");
-    if (yazi) yazi.textContent = "Konuşmak için dokunun";
-    const sure = Date.now() - AS.baslangic;
-    const blob = new Blob(AS.parcalar, { type: k.mimeType || "audio/webm" });
-    if (sure < 700 || !blob.size) return;
-    komutGonder({ ses: blob });
+    clearInterval(VA.timer);
+    stream.getTracks().forEach((t) => t.stop());
+    mic?.classList.remove("recording");
+    if (label) label.textContent = "Tap to speak";
+    const duration = Date.now() - VA.started;
+    const blob = new Blob(VA.chunks, { type: k.mimeType || "audio/webm" });
+    if (duration < 700 || !blob.size) return;
+    sendCommand({ audio: blob });
   };
   k.start(250);
 }
 
-async function komutGonder({ metin, ses }) {
-  AS.mesgul = true;
-  const pano = document.getElementById("asPano");
-  pano?.classList.add("mesgul");
-  const balon = akisaEkle(el(`<div class="as-balon">${metin ? kacir(metin) : '<span class="soluk">Ses yazıya dökülüyor…</span>'}</div>`));
-  const bekle = akisaEkle(el(`<div class="as-cevap soluk">Düşünüyor…</div>`));
+async function sendCommand({ text, audio }) {
+  VA.busy = true;
+  const panel = document.getElementById("vaPanel");
+  panel?.classList.add("busy");
+  const bubble = addToFlow(el(`<div class="va-bubble">${text ? esc(text) : '<span class="muted">Transcribing the audio…</span>'}</div>`));
+  const wait = addToFlow(el(`<div class="va-reply muted">Thinking…</div>`));
   try {
     let r;
-    if (ses) {
+    if (audio) {
       const fd = new FormData();
-      const uz = ses.type.includes("mp4") ? "mp4" : ses.type.includes("ogg") ? "ogg" : "webm";
-      fd.append("ses", ses, `komut.${uz}`);
-      if (AS.konusmaId) fd.append("konusmaId", AS.konusmaId);
-      r = await api("/asistan/ses", { method: "POST", body: fd });
+      const ext = audio.type.includes("mp4") ? "mp4" : audio.type.includes("ogg") ? "ogg" : "webm";
+      fd.append("audio", audio, `command.${ext}`);
+      if (VA.conversationId) fd.append("conversationId", VA.conversationId);
+      r = await api("/assistant/voice", { method: "POST", body: fd });
     } else {
-      r = await api("/asistan/metin", { method: "POST", body: JSON.stringify({ metin, konusmaId: AS.konusmaId }) });
+      r = await api("/assistant/text", { method: "POST", body: JSON.stringify({ text, conversationId: VA.conversationId }) });
     }
-    if (r.konusmaId) AS.konusmaId = r.konusmaId;
-    if (balon) balon.innerHTML = r.metin ? kacir(r.metin) : '<span class="soluk">(konuşma duyulmadı)</span>';
-    bekle?.remove();
-    akisaEkle(el(`<div class="as-cevap">${kacir(r.cevap)}</div>`));
-    const kartDugumleri = r.kartlar.map((k) => akisaEkle(kartHtml(k)));
-    if (r.kartlar.length > 1) {
-      const hepsi = akisaEkle(el(`<div class="as-hepsi"><button class="dg bas">Hepsini onayla (${r.kartlar.length})</button></div>`));
-      hepsi.querySelector("button").onclick = async () => {
-        hepsi.remove();
-        for (const d of kartDugumleri) { const b = d?.querySelector("[data-onayla]"); if (b && !b.disabled) await kartOnayla(d); }
+    if (r.conversationId) VA.conversationId = r.conversationId;
+    if (bubble) bubble.innerHTML = r.text ? esc(r.text) : '<span class="muted">(no speech heard)</span>';
+    wait?.remove();
+    addToFlow(el(`<div class="va-reply">${esc(r.reply)}</div>`));
+    const cardNodes = r.cards.map((k) => addToFlow(cardHtml(k)));
+    if (r.cards.length > 1) {
+      const all = addToFlow(el(`<div class="va-all"><button class="btn primary">Approve all (${r.cards.length})</button></div>`));
+      all.querySelector("button").onclick = async () => {
+        all.remove();
+        for (const d of cardNodes) { const b = d?.querySelector("[data-approve]"); if (b && !b.disabled) await approveCard(d); }
       };
     }
   } catch (e) {
-    bekle?.remove();
-    if (balon && ses) balon.innerHTML = '<span class="soluk">(ses gönderilemedi)</span>';
-    akisaEkle(el(`<div class="as-cevap hata">${kacir(e.message)}</div>`));
+    wait?.remove();
+    if (bubble && audio) bubble.innerHTML = '<span class="muted">(the audio could not be sent)</span>';
+    addToFlow(el(`<div class="va-reply error">${esc(e.message)}</div>`));
   } finally {
-    AS.mesgul = false;
-    pano?.classList.remove("mesgul");
+    VA.busy = false;
+    panel?.classList.remove("busy");
   }
 }
 
-function kartHtml(k) {
-  const d = el(`<div class="as-kart" data-kart="${kacir(k.id)}">
-    <div class="as-kart-bas">${kacir(k.baslik)}</div>
-    <ul>${k.satirlar.map((s) => `<li>${kacir(s)}</li>`).join("")}</ul>
-    ${k.not ? `<div class="as-not">${kacir(k.not)}</div>` : ""}
-    <div class="as-kart-alt"><button class="dg" data-vazgec>Vazgeç</button><button class="dg bas" data-onayla>Onayla</button></div>
+function cardHtml(k) {
+  const d = el(`<div class="va-card" data-card="${esc(k.id)}">
+    <div class="va-card-head">${esc(k.title)}</div>
+    <ul>${k.lines.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>
+    ${k.note ? `<div class="va-note">${esc(k.note)}</div>` : ""}
+    <div class="va-card-foot"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-approve>Approve</button></div>
   </div>`);
-  d.querySelector("[data-onayla]").onclick = () => kartOnayla(d);
-  d.querySelector("[data-vazgec]").onclick = async () => {
-    try { await api("/asistan/vazgec", { method: "POST", body: JSON.stringify({ id: k.id }) }); } catch {}
-    d.classList.add("bitti");
-    d.querySelector(".as-kart-alt").innerHTML = `<span class="soluk">Vazgeçildi</span>`;
+  d.querySelector("[data-approve]").onclick = () => approveCard(d);
+  d.querySelector("[data-cancel]").onclick = async () => {
+    try { await api("/assistant/cancel", { method: "POST", body: JSON.stringify({ id: k.id }) }); } catch {}
+    d.classList.add("done");
+    d.querySelector(".va-card-foot").innerHTML = `<span class="muted">Cancelled</span>`;
   };
   return d;
 }
 
-async function kartOnayla(d) {
-  const alt = d.querySelector(".as-kart-alt");
-  alt.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+async function approveCard(d) {
+  const foot = d.querySelector(".va-card-foot");
+  foot.querySelectorAll("button").forEach((b) => { b.disabled = true; });
   try {
-    const r = await api("/asistan/onayla", { method: "POST", body: JSON.stringify({ id: d.dataset.kart }) });
-    d.classList.add("bitti", "iyi");
-    alt.innerHTML = `<span class="as-tamam">✓ Yazıldı</span><button class="dg ufak" data-geri>Geri al</button>`;
-    if (r.uyari) alt.insertAdjacentHTML("beforebegin", `<div class="as-not">${kacir(r.uyari)}</div>`);
-    alt.querySelector("[data-geri]").onclick = () => islemGeriAl(r.kayit.id, alt);
-    tazeleArkada();
+    const r = await api("/assistant/approve", { method: "POST", body: JSON.stringify({ id: d.dataset.card }) });
+    d.classList.add("done", "good");
+    foot.innerHTML = `<span class="va-ok">✓ Written</span><button class="btn small" data-undo>Undo</button>`;
+    if (r.warning) foot.insertAdjacentHTML("beforebegin", `<div class="va-note">${esc(r.warning)}</div>`);
+    foot.querySelector("[data-undo]").onclick = () => undoAction(r.record.id, foot);
+    refreshBehind();
   } catch (e) {
-    alt.innerHTML = `<span class="as-hata">${kacir(e.message)}</span>`;
+    foot.innerHTML = `<span class="va-error">${esc(e.message)}</span>`;
   }
 }
 
-async function islemGeriAl(id, kutu) {
-  if (!(await onay("İşlem geri alınsın mı?", "Sesli komutla yazılan kayıt eski hâline döner.", "Geri al"))) return;
+async function undoAction(id, box) {
+  if (!(await confirmBox("Undo this action?", "The record written by the voice command goes back to how it was.", "Undo"))) return;
   try {
-    await api("/asistan/geri-al", { method: "POST", body: JSON.stringify({ id }) });
-    if (kutu) kutu.innerHTML = `<span class="soluk">Geri alındı</span>`;
-    bildir("İşlem geri alındı", "", "iyi");
-    tazeleArkada();
-    if (document.querySelector("#asPano [data-gunluk]")?.open) gunlukCiz();
-  } catch (e) { hataBildir(e); }
+    await api("/assistant/undo", { method: "POST", body: JSON.stringify({ id }) });
+    if (box) box.innerHTML = `<span class="muted">Undone</span>`;
+    toast("Action undone", "", "good");
+    refreshBehind();
+    if (document.querySelector("#vaPanel [data-log]")?.open) renderAssistantLog();
+  } catch (e) { toastError(e); }
 }
 
-/** Panelin arkasındaki sayfa yazılan kaydı göstersin. */
-function tazeleArkada() {
-  for (const k of Object.keys(tabloDurum)) delete tabloDurum[k];
-  durumYukle().then(() => { gezintiCiz(); yonlendir(); }).catch(() => {});
+/** Let the page behind the panel show the record that was written. */
+function refreshBehind() {
+  for (const k of Object.keys(tableState)) delete tableState[k];
+  loadStatus().then(() => { renderNav(); route(); }).catch(() => {});
 }
 
-async function gunlukCiz() {
-  const kutu = document.querySelector("#asPano [data-gunluk-liste]");
-  if (!kutu) return;
+async function renderAssistantLog() {
+  const box = document.querySelector("#vaPanel [data-log-list]");
+  if (!box) return;
   try {
-    const { gunluk } = await api("/asistan");
-    if (!gunluk.length) { kutu.innerHTML = bosSatir("Henüz sesli komutla yazılan bir işlem yok."); return; }
-    kutu.innerHTML = "";
-    for (const g of gunluk) {
-      const z = new Date(g.tarih);
-      const s = el(`<div class="as-gunluk-og ${g.geriAlindi ? "geri" : ""}">
-        <div><b>${kacir(g.baslik)}</b> <span class="soluk">${z.toLocaleDateString("tr-TR")} ${z.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })} · ${kacir(g.kullanici)}</span></div>
-        <div>${g.satirlar.map(kacir).join("<br>")}</div>
-        <div class="soluk">"${kacir(g.cumle)}"</div>
-        <div class="as-gunluk-alt">${g.geriAlindi ? '<span class="soluk">Geri alındı</span>' : '<button class="dg ufak" data-geri>Geri al</button>'}</div>
+    const { log } = await api("/assistant");
+    if (!log.length) { box.innerHTML = emptyRow("No action has been written by voice command yet."); return; }
+    box.innerHTML = "";
+    for (const g of log) {
+      const z = new Date(g.date);
+      const s = el(`<div class="va-log-item ${g.undoneAt ? "undone" : ""}">
+        <div><b>${esc(g.title)}</b> <span class="muted">${z.toLocaleDateString("en-GB")} ${z.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} · ${esc(g.user)}</span></div>
+        <div>${g.lines.map(esc).join("<br>")}</div>
+        <div class="muted">"${esc(g.sentence)}"</div>
+        <div class="va-log-foot">${g.undoneAt ? '<span class="muted">Undone</span>' : '<button class="btn small" data-undo>Undo</button>'}</div>
       </div>`);
-      s.querySelector("[data-geri]")?.addEventListener("click", () => islemGeriAl(g.id, s.querySelector(".as-gunluk-alt")));
-      kutu.appendChild(s);
+      s.querySelector("[data-undo]")?.addEventListener("click", () => undoAction(g.id, s.querySelector(".va-log-foot")));
+      box.appendChild(s);
     }
-  } catch (e) { kutu.innerHTML = bosSatir(e.message); }
+  } catch (e) { box.innerHTML = emptyRow(e.message); }
 }
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && document.getElementById("asPano") && !document.querySelector("#panoAlani .pano")) asistanKapat();
+  if (ev.key === "Escape" && document.getElementById("vaPanel") && !document.querySelector("#modalHost .modal")) closeAssistant();
 });
 
-/* ---------------- yönlendirme ---------------- */
+/* ---------------- routing ---------------- */
 
-async function durumYukle() {
-  S.durum = await api("/durum");
-  try { S.uyarilar = await api("/uyarilar"); } catch { S.uyarilar = []; }
-  ustBilgiCiz();
+async function loadStatus() {
+  S.status = await api("/status");
+  try { S.warnings = await api("/warnings"); } catch { S.warnings = []; }
+  renderHeader();
 }
 
-async function yonlendir() {
-  const y = (location.hash || "#panel").slice(1);
-  gezintiCiz();
+async function route() {
+  const y = (location.hash || "#dashboard").slice(1);
+  renderNav();
   try {
-    if (y === "panel") await panelCiz();
-    else if (y === "agac") await agacCiz();
-    else if (y === "yukle") await yukleCiz();
-    else if (y === "ayarlar") ayarlarCiz();
+    if (y === "dashboard") await renderDashboard();
+    else if (y === "tree") await renderTree();
+    else if (y === "upload") await renderUpload();
+    else if (y === "settings") renderSettings();
     else if (y.startsWith("t/")) {
-      const ad = y.slice(2);
-      // Bağlantı sütunları için kaynak tabloları her girişte tazele (başka ekranda değişmiş olabilirler).
-      await kaynaklariYukle(ad);
-      await tabloCiz(ad);
+      const name = y.slice(2);
+      // Refresh the source tables for link columns on every visit (they may have changed on another page).
+      await loadSources(name);
+      await renderTable(name);
     } else if (y.startsWith("d/")) {
-      const [, ad, id] = y.split("/");
-      await detayCiz(ad, id);
-    } else if (y === "puantaj" || y.startsWith("puantaj/")) {
-      await puantajCiz(y.split("/")[1] || "");
-    } else if (y === "istatistik") {
-      await istatistikCiz();
-    } else if (y === "odemeler" || y.startsWith("odemeler/")) {
-      await odemelerCiz(y.split("/")[1] || "");
-    } else if (y.startsWith("calisan/")) {
-      const [, kod, secim] = y.split("/");
-      await calisanCiz(decodeURIComponent(kod || ""), secim || "");
-    } else if (y === "ongoru") {
-      await ongoruCiz();
-    } else if (y === "kasa" || y.startsWith("kasa/")) {
-      await kasaCiz(y.split("/")[1] || "");
-    } else location.hash = "#panel";
-  } catch (e) { hataBildir(e); }
+      const [, name, id] = y.split("/");
+      await renderDetail(name, id);
+    } else if (y === "timesheet" || y.startsWith("timesheet/")) {
+      await renderTimesheet(y.split("/")[1] || "");
+    } else if (y === "statistics") {
+      await renderStatistics();
+    } else if (y === "payments" || y.startsWith("payments/")) {
+      await renderPayments(y.split("/")[1] || "");
+    } else if (y.startsWith("employee/")) {
+      const [, code, sel] = y.split("/");
+      await renderEmployeeView(decodeURIComponent(code || ""), sel || "");
+    } else if (y === "forecast") {
+      await renderForecast();
+    } else if (y === "cash" || y.startsWith("cash/")) {
+      await renderCash(y.split("/")[1] || "");
+    } else location.hash = "#dashboard";
+  } catch (e) { toastError(e); }
 }
 
-window.addEventListener("hashchange", yonlendir);
+window.addEventListener("hashchange", route);
 
-(async function baslat() {
-  const t = localStorage.getItem("kadro-tema");
-  if (t) document.documentElement.setAttribute("data-theme", t);
-  asistanDugmesiKur();
+(async function start() {
   try {
-    await durumYukle();
-    await yonlendir();
+    const t = localStorage.getItem("kadro-theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+  } catch { /* no storage */ }
+  setUpAssistantButton();
+  try {
+    await loadStatus();
+    await route();
   } catch (e) {
-    ana.innerHTML = `<div class="bos"><div class="bs">Sunucuya bağlanılamadı</div>
-      <p>baslat.bat penceresinin açık olduğundan emin olun, sonra sayfayı yenileyin.</p></div>`;
+    main.innerHTML = `<div class="empty"><div class="big">Could not reach the server</div>
+      <p>Make sure the start.bat window is open, then reload the page.</p></div>`;
   }
 })();
