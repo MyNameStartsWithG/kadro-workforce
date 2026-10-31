@@ -1,0 +1,25 @@
+node_modules/
+insa/
+*.log
+
+# Gerçek veri ve belgeler (geliştirmede ./veri ve ./ACME MUHENDISLIK)
+veri/
+ACME MUHENDISLIK/
+
+# Paketler: exe'de sesli komut anahtarı gömülü; ornek-veri müşteri verisinden türetildi.
+# Sadece müşteri paketine giren BENİ OKU şablonu depoda.
+dagitim/*
+!dagitim/musteri/
+dagitim/musteri/*
+!dagitim/musteri/BENİ OKU.txt
+
+# Canlı sunucudan alınan akış yedekleri ve indirilen komut kayıtları (kişisel veri)
+n8n/yedek/
+n8n/kayitlar/
+
+# Test çalışma klasörü ve arayüz testi çıktıları
+test/.calisma/
+test/cikti/
+
+# Editör / araç ayarları
+.claude/
